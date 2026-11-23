@@ -29,7 +29,7 @@ ninja -C build/rp2350-trustzone
 tests/rp2350/trustzone/smoke-test.sh
 ```
 
-The pre-integration run passed all six qtest cases, both hello UART
+The integrated run passed all ten qtest cases, both hello UART
 boot paths (`-kernel` and `-drive if=mtd`), and the two blink transitions
 on GPIO25. The existing smoke runner builds hello and blink with
 pico-sdk 2.3.1. The TrustZone smoke runner captures
@@ -47,21 +47,27 @@ Non-secure spinlock check.
 
 ## Integration
 
-ACCESSCTRL should use `sio.gpio_nsmask[0/1]` for GPIO_NSMASK reads and call
-`rp2350_sio_gpio_set_nsmask()` for permitted writes. Apply the relevant
-reset or configuration-reset semantics through the same interface and
-keep one copy of the mask state. IO_BANK0 and PADS_BANK0 use those masks
-per pin. The bus filter must preserve `MemTxAttrs` through the normal
-and atomic aliases. SIO handles its bank selection and mirror denial
-internally. DMA exclusion from SIO needs the DMA requester integration.
+ACCESSCTRL and SIO share GPIO_NSMASK0/1. IO_BANK0, PADS_BANK0 and the
+GPIO coprocessor use that assignment. The default smoke test opens
+the IO and pad ports while leaving the GPIO assignment in its Secure
+reset state. The opt-in GPIO variant assigns GPIO1 and GPIO33 to NS.
 
-Before ACCESSCTRL integration the default smoke test exercises the
-all-Secure GPIO reset assignment. The test firmware sets the Cortex-M33
-SAU for the peripheral windows because this board model lacks the RP2350
-IDAU peripheral exemptions. The Secure CPU controls access to RESETS
-and Boot RAM before enabling the SAU regions for the Non-secure probes.
-This lets the probes reach the target as Non-secure bus transactions so
-a denied access can be distinguished from a processor attribution fault.
+The Cortex-M33 and DMA share an identity-translating IOMMU region as
+their bus filter. Normal RAM and ROM accesses can still use QEMU's
+direct RAM path, and ACL changes invalidate the CPU TLB. When a
+striped SRAM page contains banks with different permissions, each word
+is checked as MMIO. The filter routes denied transactions to a region
+that returns `MEMTX_ACCESS_ERROR`. Allowed accesses keep their
+`MemTxAttrs` through the APB and AHB register aliases. ACCESSCTRL has
+its own write checks. Boot RAM has a fixed Secure-only rule and SIO
+handles its bank selection and mirror denial internally. DMA cannot
+reach SIO. RESETS also masks individual peripheral controls according
+to their NS availability.
+
+The test firmware sets the Cortex-M33 SAU for the peripheral windows
+because this board model lacks the RP2350 IDAU peripheral exemptions.
+This lets the NS probes reach the bus so a denied access can be
+distinguished from a processor attribution fault.
 
 ### Opt-in firmware
 
@@ -85,24 +91,20 @@ ninja -C "$fw"
 ```
 
 Each launch checks all of its UART pass markers and fails if any marker is
-missing or the firmware prints a failure. Run these cases independently
-before integration so one expected failure does not hide the others.
+missing or the firmware prints a failure.
 
-| Case | Allowed control | Denial check | Observed on the pre-integration model |
+| Case | Allowed control | Denial check | Observed on the integrated model |
 | --- | --- | --- | --- |
-| `gpio` | NS can access GPIO1/33 through the real masks and IO/pad permissions | GPIO0/32 stay Secure and NS cannot access the SIO mirror | Mask write readback failed |
-| `filter` | Secure and granted NSP reads of the same RESETS.RESET_DONE SET-alias word agree | Revoke NSP access, preserve SP access, then require a precise BusFault at `0x40022008` for the next NSP read | Secure control passed, ACCESSCTRL permission readback failed |
-| `bootram_read` | Secure direct read/write and a SET-alias write reach the same word | NS read at `0x400e03fc` must take a precise BusFault and leave the fixture intact | Secure control passed, NS read returned |
-| `bootram_write` | Same Secure control as the read case | NS SET-alias write at `0x400e23fc` must take a precise BusFault and leave the fixture intact | Secure control passed, NS write changed the fixture |
-| `dma` | NSP DMA channel 0 copies one word from SRAM8 and then SRAM9 to SRAM8 while both banks allow NSP | Revoke SRAM9 NSP/NSU access, then require `AHB_ERROR` and `READ_ERROR`, no `WRITE_ERROR`, and an unchanged destination for the same SRAM9 read | ACCESSCTRL DMA permission readback failed before starting a transfer |
+| `gpio` | NS can access GPIO1/33 through the real masks and IO/pad permissions | GPIO0/32 stay Secure and NS cannot access the SIO mirror | Passed |
+| `filter` | Secure sees full RESETS.RESET_DONE and granted NSP sees the UART0 and SYSINFO bits through the same SET alias | Revoke RESETS NSP access, preserve SP access, then require a precise BusFault at `0x40022008` for the next NSP read | Passed |
+| `bootram_read` | Secure direct read/write and a SET-alias write reach the same word | NS read at `0x400e03fc` takes a precise BusFault and leaves the fixture intact | Passed |
+| `bootram_write` | Same Secure control as the read case | NS SET-alias write at `0x400e23fc` takes a precise BusFault and leaves the fixture intact | Passed |
+| `dma` | NSP DMA channel 0 copies one word from SRAM8 and then SRAM9 to SRAM8 while both banks allow NSP | Revoke SRAM9 NSP/NSU access and check `AHB_ERROR`, `READ_ERROR`, no `WRITE_ERROR`, and an unchanged destination for the same SRAM9 read | Passed |
 
-All five ELFs built with pico-sdk 2.3.1. The six-case RP2350 qtest,
-the existing hello/blink smoke, and the default SIO/GPIO smoke passed.
-Each opt-in launch exited with status 1 on the pre-integration model.
-The Boot RAM qtest checks the storage and alias control through ordinary
-qtest MMIO. The opt-in firmware checks NS read and write denial using
-real CPU transactions. The datasheet specifies a Secure-only endpoint.
-The tests expect BusFault for that endpoint rejection under ADR 0002.
+All five opt-in ELFs built with pico-sdk 2.3.1 and returned success
+from the smoke runner. The summary above includes the existing tests.
+The Boot RAM firmware verifies the fixed endpoint rejection through
+real CPU transactions, in addition to the qtest checks.
 Use these Boot RAM fixtures with the board model because boot firmware
 can own the RAM contents on silicon.
 
@@ -110,10 +112,13 @@ The DMA test uses synthetic words, the same NSP channel for all three
 transfers, and the DMA MPU's permissive reset configuration. This checks
 the downstream SRAM9 permission independently of DMA MPU regions.
 `arm-none-eabi-nm -n "$fw/rp2350_dma.elf"` placed the NS source and
-destination in SRAM8 and the Secure fixture in SRAM9. The successful
-copies, DMA status bits and Secure SRAM denial await the real models.
+destination in SRAM8 and the Secure fixture in SRAM9. A separate DMA
+qtest covers a two-word transfer, channel locking and reset, masked
+MPU register access, region priority, read and write errors, completion
+and error IRQ status and line assertion, and recovery after clearing
+the error.
 
-To observe the RESETS fault in GDB after integration, boot
+To observe the RESETS fault in GDB, boot
 `rp2350_filter.elf` with `-S -gdb tcp:127.0.0.1:1234`. Connect an Arm
 GDB and stop on the firmware's fault handler.
 
@@ -125,10 +130,10 @@ p/x *(unsigned int *)0xe000ed28
 p/x *(unsigned int *)0xe000ed38
 ```
 
-CFSR should have `PRECISERR` and `BFARVALID` set (mask `0x8200`).
-BFAR should read `0x40022008`. The guest CPU performs the faulting access.
-ADR 0002 specifies a debugger bypass for QEMU filter accesses, so a
-debugger MMIO read of RESETS would test a different path.
+GDB stopped at `isr_busfault` with CFSR `0x8200` (`PRECISERR` and
+`BFARVALID`) and BFAR `0x40022008`. The guest CPU performs the
+faulting access. The QEMU debugger bypasses the bus ACL under ADR 0002,
+which differs from a hardware debugger's `DBG` permission.
 
 ### Permission matrix for the integrated qtest
 
@@ -147,32 +152,27 @@ port's ACCESSCTRL register, before adding the manager bit.
 | NSP + NSU (`0x3`) | deny | deny | allow | allow |
 | all (`0xf`) | allow | allow | allow | allow |
 
-For each row, set one manager bit at a time (`CORE0=0x10`,
-`CORE1=0x20`, `DMA=0x40`, hardware `DBG=0x80`) and exercise each
-manager. An unset manager bit always denies an ordinary bus transaction,
-even when all four state bits are set. Also check the no-manager row
-against all four states. If the integrated model represents a hardware
-debug manager, apply the matrix to its ordinary transactions. In QEMU
-check `attrs.debug` separately with a deny-all port to verify the
-GDB bypass required by the ADR.
+The qtest drives all 16 permission nibbles, all four states, and
+the four enable combinations of Core 0 and DMA on both UART0 and
+SRAM9. Each read/write pair checks the transaction result and whether
+the write reached the target. Additional cases check all three UART0
+atomic aliases, mixed permissions on adjacent SRAM stripes, the SIO
+and Boot RAM exceptions, and RESETS field visibility.
 
-Run the matrix on APB and SRAM ports such as RESETS and SRAM9. On APB
-repeat through the canonical and SET/CLR/XOR windows. Use an observable
-writable word and read it back from a permitted context after each write.
-Check that allowed reads return the seeded value, allowed writes change
-only the selected port, and denied reads and writes return a failed
-transaction with the word unchanged. Restore an allowed configuration
-for the readback when a case denies every ordinary manager. Configure
-the other port to allow the same transaction and verify it remains
-accessible. Preserve and restore the register values around each case.
+The qtest-only `memtxl` command carries `MemTxAttrs.secure`, `user`,
+`debug` and `requester_id`, and reports the actual `MemTxResult`.
+The model uses QEMU's default requester ID 0 for Core 0 and ID 2 for
+DMA. `attrs.debug` supplies the bypass used to seed and check target
+state even on deny-all ports. The opt-in firmware also exercises
+actual CPU and DMA transactions through the same filter.
 
-Wire these rows into the owner's filter test driver where it can send
-`MemTxAttrs.secure`, `user`, and the manager's `requester_id` with the
-transaction and assert its `MemTxResult`. Ordinary qtest MMIO commands
-use `MEMTXATTRS_UNSPECIFIED` and do not expose the result, so they can
-seed and check registers but cannot drive this matrix. Use the integrated
-owner mapping for core 1 and DMA IDs. The independent firmware covers
-real core 0 SP/NSP and NSP DMA paths once the models are connected.
+### Model limits
+
+DMA models permanent-request transfers and raises the four modeled
+IRQ lines from channel status. Peripheral and timer DREQ pacing,
+sniffing, cycle arbitration, and debug counters are outside this
+milestone. The model runs transfers as virtual timer events. Live
+migration, physical silicon, and second-core behavior were untested.
 
 GPIO function routing and IRQ delivery, QSPI pad control, and PIO
 observation require models for those paths. Pad access uses logical GPIO
@@ -181,4 +181,5 @@ the rules in RP-008373 §§2.1.2, 3.1.1, 3.6.1, 4.3, 10.2.2, 10.6 and
 10.7, including channel assignment and error reporting in §§12.6.6–7.
 [RP2350 datasheet](https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf),
 [pico-sdk 2.3.1 register headers](https://github.com/raspberrypi/pico-sdk/tree/2.3.1/src/rp2350/hardware_regs/include/hardware/regs),
+[QEMU memory API](../../../docs/devel/memory.rst),
 [ADR 0002](https://github.com/Embeded-ojisan/rpi_pico2_qemu_inner/blob/main/docs/adr/0002-own-bus-security-filter.md).

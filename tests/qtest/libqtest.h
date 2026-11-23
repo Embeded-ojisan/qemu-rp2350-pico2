@@ -24,6 +24,13 @@
 
 typedef struct QTestState QTestState;
 
+/*
+ * Perform one word transaction and return its MemTxResult. Flags 0, 1 and 2
+ * provide the secure, user and debug attribute bits respectively.
+ */
+unsigned qtest_memtxl(QTestState *s, uint64_t addr, unsigned flags,
+                      unsigned requester, bool write, uint32_t *value);
+
 /**
  * qtest_initf:
  * @fmt: Format for creating other arguments to pass to QEMU, formatted

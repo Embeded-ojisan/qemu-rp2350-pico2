@@ -28,6 +28,7 @@
 
 #define RP2350_NUM_IRQ          52  /* pico-sdk platform_defs.h NUM_IRQS */
 #define RP2350_TIMER0_IRQ_0     0   /* pico-sdk intctrl.h */
+#define RP2350_DMA_IRQ_0        10
 #define RP2350_UART0_IRQ        33
 
 #define RP2350_SIO_BASE         0xd0000000
@@ -57,6 +58,7 @@ static const hwaddr rp2350_alias_base[RP2350_ALIAS_NUM] = {
     [RP2350_ALIAS_UART0]  = 0x40070000,
     [RP2350_ALIAS_TIMER0] = 0x400b0000,
     [RP2350_ALIAS_QMI]    = 0x400d0000,
+    [RP2350_ALIAS_DMA]    = 0x50000000,
 };
 
 static const struct {
@@ -69,7 +71,6 @@ static const struct {
     { "psm",                0x40018000, 0x8000 },
     { "io_qspi",            0x40030000, 0x8000 },
     { "pads_qspi",          0x40040000, 0x8000 },
-    { "accessctrl",         0x40060000, 0x8000 },
     { "busctrl",            0x40068000, 0x8000 },
     { "uart1",              0x40078000, 0x8000 },
     { "spi0",               0x40080000, 0x8000 },
@@ -91,7 +92,6 @@ static const struct {
     { "coresight_periph",   0x40140000, 0x18000 },
     { "glitch_detector",    0x40158000, 0x8000 },
     { "tbman",              0x40160000, 0x8000 },
-    { "dma",                0x50000000, 0x100000 },
     { "usbctrl",            0x50100000, 0x100000 },
     { "pio0",               0x50200000, 0x100000 },
     { "pio1",               0x50300000, 0x100000 },
@@ -152,6 +152,11 @@ static void rp2350_init(Object *obj)
                                 rp2350_regs_blocks[i].type);
     }
     object_initialize_child(obj, "sio", &s->sio, TYPE_RP2350_SIO);
+    object_initialize_child(obj, "accessctrl", &s->accessctrl,
+                            TYPE_RP2350_ACCESSCTRL);
+    s->accessctrl.sio = &s->sio;
+    s->regs[RP2350_REGS_RESETS].accessctrl = &s->accessctrl;
+    object_initialize_child(obj, "dma", &s->dma, TYPE_RP2350_DMA);
     s->regs[RP2350_REGS_IO_BANK0].gpio_sio = &s->sio;
     s->regs[RP2350_REGS_PADS_BANK0].gpio_sio = &s->sio;
     object_initialize_child(obj, "timer0", &s->timer0, TYPE_RP2350_TIMER);
@@ -193,6 +198,12 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
     }
     memory_region_add_subregion(sysmem, RP2350_SRAM_BASE, &s->sram);
 
+    sbd = SYS_BUS_DEVICE(&s->accessctrl);
+    if (!sysbus_realize(sbd, errp)) {
+        return;
+    }
+    sysbus_mmio_map(sbd, 0, RP2350_ACCESSCTRL_BASE);
+
     qdev_prop_set_string(armv7m, "cpu-type", ARM_CPU_TYPE_NAME("cortex-m33"));
     qdev_prop_set_uint32(armv7m, "num-irq", RP2350_NUM_IRQ);
     /* datasheet 3.7: 4 priority bits, 8 Secure and 8 Non-secure MPU regions */
@@ -203,8 +214,8 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
     qdev_prop_set_uint8(armv7m, "coprocessors", RP2350_COPROCESSORS);
     qdev_connect_clock_in(armv7m, "cpuclk", s->sysclk);
     qdev_connect_clock_in(armv7m, "refclk", s->refclk);
-    object_property_set_link(OBJECT(armv7m), "memory", OBJECT(sysmem),
-                             &error_abort);
+    object_property_set_link(OBJECT(armv7m), "memory",
+                             OBJECT(&s->accessctrl.bus), &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(armv7m), errp)) {
         return;
     }
@@ -217,6 +228,25 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
         rp2350_map_alias(s, i, object_get_typename(OBJECT(sbd)),
                          sysbus_mmio_get_region(sbd, 0),
                          rp2350_regs_blocks[i].base);
+    }
+
+    sbd = SYS_BUS_DEVICE(&s->dma);
+    address_space_init(&s->dma_bus, MEMORY_REGION(&s->accessctrl.bus),
+                        "rp2350.dma-bus");
+    s->dma.bus = &s->dma_bus;
+    if (!sysbus_realize(sbd, errp)) {
+        return;
+    }
+    rp2350_map_alias(s, RP2350_ALIAS_DMA, "rp2350-dma",
+                     sysbus_mmio_get_region(sbd, 0),
+                     rp2350_alias_base[RP2350_ALIAS_DMA]);
+    qdev_connect_gpio_out_named(DEVICE(&s->regs[RP2350_REGS_RESETS]),
+                               "dma-reset", 0,
+                               qdev_get_gpio_in_named(DEVICE(&s->dma),
+                                                      "reset", 0));
+    for (int i = 0; i < RP2350_DMA_IRQS; i++) {
+        sysbus_connect_irq(sbd, i,
+                           qdev_get_gpio_in(armv7m, RP2350_DMA_IRQ_0 + i));
     }
 
     sbd = SYS_BUS_DEVICE(&s->sio);

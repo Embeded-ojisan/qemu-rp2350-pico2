@@ -35,6 +35,8 @@ struct RP2350RegsState {
 
     MemoryRegion iomem;
     struct RP2350SIOState *gpio_sio;
+    struct RP2350AccessCtrl *accessctrl;
+    qemu_irq dma_reset;
     uint32_t regs[RP2350_REGS_NUM_WORDS];
 };
 

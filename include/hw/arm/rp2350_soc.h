@@ -10,7 +10,9 @@
 #include "hw/arm/armv7m.h"
 #include "hw/char/pl011.h"
 #include "hw/core/clock.h"
+#include "hw/dma/rp2350_dma.h"
 #include "hw/gpio/rp2350_sio.h"
+#include "hw/misc/rp2350_accessctrl.h"
 #include "hw/misc/rp2350_atomic.h"
 #include "hw/misc/rp2350_regs.h"
 #include "hw/ssi/rp2350_qmi.h"
@@ -45,6 +47,7 @@ enum {
     RP2350_ALIAS_UART0 = RP2350_REGS_NUM,
     RP2350_ALIAS_TIMER0,
     RP2350_ALIAS_QMI,
+    RP2350_ALIAS_DMA,
     RP2350_ALIAS_NUM
 };
 
@@ -54,6 +57,9 @@ struct RP2350State {
     ARMv7MState armv7m;
     RP2350RegsState regs[RP2350_REGS_NUM];
     RP2350SIOState sio;
+    RP2350AccessCtrl accessctrl;
+    RP2350DMAState dma;
+    AddressSpace dma_bus;
     RP2350TimerState timer0;
     RP2350QMIState qmi;
     PL011State uart0;

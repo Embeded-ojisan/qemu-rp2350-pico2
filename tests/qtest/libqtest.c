@@ -1375,6 +1375,21 @@ uint32_t qtest_readl(QTestState *s, uint64_t addr)
     return qtest_read(s, "readl", addr);
 }
 
+unsigned qtest_memtxl(QTestState *s, uint64_t addr, unsigned flags,
+                      unsigned requester, bool write, uint32_t *value)
+{
+    g_auto(GStrv) args = NULL;
+    unsigned result, data;
+
+    qtest_sendf(s, "memtxl 0x%" PRIx64 " %u %u %u 0x%" PRIx32 "\n",
+                addr, flags, requester, (unsigned)write, write ? *value : 0);
+    args = qtest_rsp_args(s, 3);
+    g_assert_cmpint(qemu_strtoui(args[1], NULL, 0, &result), ==, 0);
+    g_assert_cmpint(qemu_strtoui(args[2], NULL, 0, &data), ==, 0);
+    *value = data;
+    return result;
+}
+
 uint64_t qtest_readq(QTestState *s, uint64_t addr)
 {
     return qtest_read(s, "readq", addr);

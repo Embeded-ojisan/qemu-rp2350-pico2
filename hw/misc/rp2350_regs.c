@@ -11,6 +11,8 @@
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
 #include "hw/gpio/rp2350_sio.h"
+#include "hw/core/irq.h"
+#include "hw/misc/rp2350_accessctrl.h"
 #include "hw/misc/rp2350_regs.h"
 #include "migration/vmstate.h"
 #include "trace.h"
@@ -18,6 +20,7 @@
 /* RESETS */
 #define RESETS_RESET            0x000
 #define RESETS_RESET_DONE       0x008
+#define RESETS_RESET_DMA        BIT(2)
 #define RESETS_ALL_BITS         0x1fffffff
 
 /* CLOCKS: each clock has CTRL, DIV and SELECTED at a 12-byte stride */
@@ -179,8 +182,22 @@ static bool rp2350_resets_write(RP2350RegsState *s, hwaddr offset,
 {
     if (offset == RESETS_RESET) {
         trace_rp2350_resets(value);
+        qemu_set_irq(s->dma_reset, !!(value & RESETS_RESET_DMA));
     }
     return offset == RESETS_RESET_DONE; /* read-only */
+}
+
+static void rp2350_resets_init(Object *obj)
+{
+    RP2350RegsState *s = RP2350_REGS(obj);
+
+    qdev_init_gpio_out_named(DEVICE(obj), &s->dma_reset, "dma-reset", 1);
+}
+
+static uint32_t rp2350_resets_ns_mask(RP2350RegsState *s, hwaddr offset)
+{
+    return offset <= RESETS_RESET_DONE ?
+           rp2350_accessctrl_ns_reset_mask(s->accessctrl) : 0;
 }
 
 static void rp2350_resets_class_init(ObjectClass *klass, const void *data)
@@ -190,6 +207,7 @@ static void rp2350_resets_class_init(ObjectClass *klass, const void *data)
     rc->reset_values = rp2350_resets_reset_values;
     rc->read = rp2350_resets_read;
     rc->write = rp2350_resets_write;
+    rc->nonsecure_mask = rp2350_resets_ns_mask;
 }
 
 /*
@@ -424,6 +442,7 @@ static const TypeInfo rp2350_regs_types[] = {
     }, {
         .name = TYPE_RP2350_RESETS,
         .parent = TYPE_RP2350_REGS,
+        .instance_init = rp2350_resets_init,
         .class_init = rp2350_resets_class_init,
     }, {
         .name = TYPE_RP2350_CLOCKS,

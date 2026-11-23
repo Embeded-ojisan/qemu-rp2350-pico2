@@ -97,6 +97,8 @@ int main(void)
 #if RP2350_TEST_ACCESSCTRL
     ACCESSCTRL(ACCESSCTRL_GPIO_NSMASK0_OFFSET) = NS_PINS;
     ACCESSCTRL(ACCESSCTRL_GPIO_NSMASK1_OFFSET) = NS_PINS;
+#endif
+    /* Exercise the per-pin mask through peripherals visible to NSP. */
     ACCESSCTRL(ACCESSCTRL_IO_BANK0_OFFSET) = 0xacce0000u |
         ACCESSCTRL_IO_BANK0_RESET | ACCESSCTRL_IO_BANK0_NSP_BITS;
     ACCESSCTRL(ACCESSCTRL_PADS_BANK0_OFFSET) = 0xacce0000u |
@@ -106,7 +108,6 @@ int main(void)
         puts("FAIL: ACCESSCTRL GPIO assignment did not take effect");
         wait_for_stop();
     }
-#endif
     if (SIO(SIO_SPINLOCK0_OFFSET) != 1) {
         puts("FAIL: Secure spinlock claim");
         wait_for_stop();

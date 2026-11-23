@@ -194,6 +194,16 @@ IrqInterceptState irq_intercept_state;
  *
  * .. code-block:: none
  *
+ *  > memtxl ADDR FLAGS REQUESTER WRITE VALUE
+ *  < OK MEMTX_RESULT VALUE
+ *
+ * Perform a 32-bit memory transaction. FLAGS bits 0, 1 and 2 select
+ * secure, user and debug attributes. WRITE is 0 for a read and 1 for a
+ * write. VALUE is ignored for reads. This command requires the qtest
+ * accelerator.
+ *
+ * .. code-block:: none
+ *
  *  > read ADDR SIZE
  *  < OK DATA
  *
@@ -521,6 +531,33 @@ static void qtest_process_command(CharFrontend *chr, gchar **words)
             value = cpu_inl(addr);
         }
         qtest_sendf(chr, "OK 0x%04x\n", value);
+    } else if (qtest_enabled() && strcmp(words[0], "memtxl") == 0) {
+        uint64_t addr;
+        unsigned flags, requester, value, write;
+        uint32_t data;
+        MemTxAttrs attrs;
+        MemTxResult result;
+
+        if (g_strv_length(words) != 6 ||
+            qemu_strtou64(words[1], NULL, 0, &addr) ||
+            qemu_strtoui(words[2], NULL, 0, &flags) || flags > 7 ||
+            qemu_strtoui(words[3], NULL, 0, &requester) ||
+            requester > UINT16_MAX ||
+            qemu_strtoui(words[4], NULL, 0, &write) || write > 1 ||
+            qemu_strtoui(words[5], NULL, 0, &value)) {
+            qtest_send(chr, "FAIL invalid memtxl arguments\n");
+            return;
+        }
+        attrs = (MemTxAttrs) {
+            .secure = flags & 1,
+            .user = (flags >> 1) & 1,
+            .debug = (flags >> 2) & 1,
+            .requester_id = requester,
+        };
+        data = tswap32(value);
+        result = address_space_rw(first_cpu->as, addr, attrs,
+                                  &data, sizeof(data), write);
+        qtest_sendf(chr, "OK %u 0x%08" PRIx32 "\n", result, tswap32(data));
     } else if (strcmp(words[0], "writeb") == 0 ||
                strcmp(words[0], "writew") == 0 ||
                strcmp(words[0], "writel") == 0 ||

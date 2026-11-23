@@ -54,12 +54,17 @@ static void run_case(void)
     require(REG(FILTER_ALIAS, 0) == reset_done, "Secure RESETS alias mismatch");
     puts("PASS: Secure RESETS control");
 
+    require(set_permission(ACCESSCTRL_UART0_OFFSET,
+                           ACCESSCTRL_UART0_RESET | ACCESSCTRL_UART0_NSP_BITS),
+            "ACCESSCTRL UART0 allow configuration did not take effect");
     require(set_permission(ACCESSCTRL_RESETS_OFFSET,
                            secure | ACCESSCTRL_RESETS_NSP_BITS),
             "ACCESSCTRL RESETS allow configuration did not take effect");
     sau_region(1, RESETS_BASE, RESETS_BASE + 0x3fff);
     sau_enable(true);
-    require(read_port() == reset_done, "Non-secure RESETS allow readback");
+    require(read_port() == (reset_done & (RESETS_RESET_DONE_UART0_BITS |
+                                         RESETS_RESET_DONE_SYSINFO_BITS)),
+            "Non-secure RESETS allow readback");
     sau_enable(false);
     puts("PASS: Non-secure RESETS access granted");
 
