@@ -57,3 +57,7 @@ allwinner_gpio_set(const char *port, int line, int level) "[%s:%d] <- %d"
 allwinner_gpio_read(const char *reg, uint32_t value) "[%s] -> 0x%" PRIx32
 allwinner_gpio_write(const char *reg, uint32_t value) "[%s] <- 0x%" PRIx32
 allwinner_gpio_out_pin(const char *reg, uint32_t pin, uint32_t value) "[%s.%d] <- 0x%" PRIx32
+
+# rp2350_sio.c
+rp2350_sio_gpio_out(unsigned pin, int level) "GPIO%u out %d"
+rp2350_sio_gpio_oe(unsigned bank, uint32_t value) "bank %u OE 0x%08x"
