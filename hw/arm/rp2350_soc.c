@@ -13,6 +13,7 @@
 #include "qemu/log.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
+#include "hw/arm/rp2350_coproc.h"
 #include "hw/arm/rp2350_soc.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
@@ -197,6 +198,8 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
     qdev_prop_set_uint8(armv7m, "num-prio-bits", 4);
     qdev_prop_set_uint32(armv7m, "mpu-ns-regions", 8);
     qdev_prop_set_uint32(armv7m, "mpu-s-regions", 8);
+    /* datasheet 3.6: GPIO coprocessor on cp0, DCP on cp4 */
+    qdev_prop_set_uint8(armv7m, "coprocessors", RP2350_COPROCESSORS);
     qdev_connect_clock_in(armv7m, "cpuclk", s->sysclk);
     qdev_connect_clock_in(armv7m, "refclk", s->refclk);
     object_property_set_link(OBJECT(armv7m), "memory", OBJECT(sysmem),
@@ -220,6 +223,7 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
         return;
     }
     sysbus_mmio_map(sbd, 0, RP2350_SIO_BASE);
+    rp2350_coproc_init(s->armv7m.cpu, &s->sio);
 
     sbd = SYS_BUS_DEVICE(&s->timer0);
     if (!sysbus_realize(sbd, errp)) {
