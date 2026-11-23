@@ -1019,7 +1019,8 @@ static uint32_t nvic_readl(NVICState *s, uint32_t offset, MemTxAttrs attrs)
         if (!arm_feature(&cpu->env, ARM_FEATURE_V7)) {
             goto bad_offset;
         }
-        return ((s->num_irq - NVIC_FIRST_IRQ) / 32) - 1;
+        /* Report the last implemented bank, even if it is partial. */
+        return DIV_ROUND_UP(MAX(1, s->num_irq - NVIC_FIRST_IRQ), 32) - 1;
     case 0xc: /* CPPWR */
         if (!arm_feature(&cpu->env, ARM_FEATURE_V8)) {
             goto bad_offset;

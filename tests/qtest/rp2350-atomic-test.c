@@ -1,5 +1,5 @@
 /*
- * QTest for the RP2350 atomic register access aliases (datasheet 2.1.3)
+ * QTest for the RP2350 atomic register access aliases and NVIC
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -19,6 +19,8 @@
 #define RESETS_ALL              0x1fffffff
 /* UART0 (PL011, behind the bus interposer): UARTIBRD is 16 bits */
 #define UART0_UARTIBRD          (0x40070000 + 0x024)
+/* Cortex-M33 ICTR (RP2350 datasheet 3.7.5) */
+#define M33_ICTR                0xe000e004
 
 static void check_all_aliases(uint32_t addr, uint32_t expected)
 {
@@ -69,6 +71,12 @@ static void test_interposer_pl011(void)
     g_assert_cmphex(readl(UART0_UARTIBRD), ==, 0x0140);
 }
 
+static void test_nvic_ictr(void)
+{
+    /* RP2350's 52 IRQ inputs span two banks. */
+    g_assert_cmphex(readl(M33_ICTR), ==, 1);
+}
+
 int main(int argc, char **argv)
 {
     int ret;
@@ -78,6 +86,7 @@ int main(int argc, char **argv)
     qtest_add_func("/rp2350/atomic/xor-set-clr", test_xor_set_clr);
     qtest_add_func("/rp2350/atomic/resets", test_resets);
     qtest_add_func("/rp2350/atomic/interposer-pl011", test_interposer_pl011);
+    qtest_add_func("/rp2350/nvic/ictr", test_nvic_ictr);
 
     qtest_start("-machine raspi-pico2");
     ret = g_test_run();
