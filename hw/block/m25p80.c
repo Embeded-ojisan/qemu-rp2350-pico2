@@ -1957,3 +1957,11 @@ BlockBackend *m25p80_get_blk(DeviceState *dev)
 {
     return M25P80(dev)->blk;
 }
+
+uint8_t *m25p80_get_storage(DeviceState *dev, uint32_t *size)
+{
+    Flash *s = M25P80(dev);
+
+    *size = s->size;
+    return s->storage;
+}

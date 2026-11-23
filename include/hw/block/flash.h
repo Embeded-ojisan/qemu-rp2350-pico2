@@ -50,4 +50,12 @@ PFlashCFI02 *pflash_cfi02_register(hwaddr base,
 
 BlockBackend *m25p80_get_blk(DeviceState *dev);
 
+/*
+ * m25p80_get_storage: return the flash contents buffer (valid after
+ * realize) so that a memory-mapped XIP window can expose it directly.
+ * Callers that read it while the guest drives the SPI bus must take
+ * care of coherency themselves.
+ */
+uint8_t *m25p80_get_storage(DeviceState *dev, uint32_t *size);
+
 #endif
