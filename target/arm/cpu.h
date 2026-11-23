@@ -1055,6 +1055,12 @@ struct ArchCPU {
     uint32_t init_svtor;
     /* For v8M, initial value of the Non-secure VTOR */
     uint32_t init_nsvtor;
+    /*
+     * M profile: bitmask of the IMPLEMENTATION DEFINED coprocessors 0..7
+     * that the board provides. Their CPACR and NSACR fields become
+     * writable, and the board registers their cp registers.
+     */
+    uint8_t m_coprocessors;
 
     /* [QEMU_]KVM_ARM_TARGET_* constant for this CPU, or
      * QEMU_KVM_ARM_TARGET_NONE if the kernel doesn't support this CPU type.
@@ -2570,6 +2576,10 @@ FIELD(TBFLAG_M32, FPCCR_S_WRONG, 4, 1)          /* Not cached. */
 FIELD(TBFLAG_M32, MVE_NO_PRED, 5, 1)            /* Not cached. */
 /* Set if in secure mode */
 FIELD(TBFLAG_M32, SECURE, 6, 1)
+/* Coprocessors 0..7 whose insns take a NOCP UsageFault to current state */
+FIELD(TBFLAG_M32, CP_NOCP, 7, 8)
+/* Coprocessors 0..7 whose insns take a NOCP UsageFault to Secure state */
+FIELD(TBFLAG_M32, CP_NOCP_S, 15, 8)
 
 /*
  * Bit usage when in AArch64 state

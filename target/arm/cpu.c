@@ -1712,6 +1712,9 @@ static void arm_cpu_post_init(Object *obj)
         object_property_add_uint32_ptr(obj, "init-nsvtor",
                                        &cpu->init_nsvtor,
                                        OBJ_PROP_FLAG_READWRITE);
+        object_property_add_uint8_ptr(obj, "m-coprocessors",
+                                      &cpu->m_coprocessors,
+                                      OBJ_PROP_FLAG_READWRITE);
     }
 
     /* Not DEFINE_PROP_UINT32: we want this to be settable after realize */

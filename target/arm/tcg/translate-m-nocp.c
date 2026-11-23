@@ -742,6 +742,23 @@ static bool trans_NOCP(DisasContext *s, arg_nocp *a)
         a->cp = 10;
     }
 
+    if (a->cp < 8) {
+        /*
+         * IMPLEMENTATION DEFINED coprocessors 0..7 (for instance the RP2350
+         * GPIO and double-precision coprocessors): if enabled, let the
+         * main decode handle the insn through the board's cp registers.
+         */
+        if (s->m_cp_nocp & (1 << a->cp)) {
+            gen_exception_insn(s, 0, EXCP_NOCP, syn_uncategorized());
+            return true;
+        }
+        if (s->m_cp_nocp_s & (1 << a->cp)) {
+            gen_exception_insn_el(s, 0, EXCP_NOCP, syn_uncategorized(), 3);
+            return true;
+        }
+        return false;
+    }
+
     if (a->cp != 10) {
         gen_exception_insn(s, 0, EXCP_NOCP, syn_uncategorized());
         return true;

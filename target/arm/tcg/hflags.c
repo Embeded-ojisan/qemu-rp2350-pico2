@@ -167,6 +167,29 @@ static CPUARMTBFlags rebuild_hflags_m32(CPUARMState *env, int fp_el,
     if (arm_feature(env, ARM_FEATURE_M_SECURITY) && env->v7m.secure) {
         DP_TBFLAG_M32(flags, SECURE, 1);
     }
+
+    /*
+     * Coprocessors 0..7: same checks and order as for the FP extension in
+     * fp_exception_el(). Coprocessors the board does not provide always
+     * take NOCP.
+     */
+    {
+        uint8_t present = env_archcpu(env)->m_coprocessors;
+        bool is_priv = arm_current_el(env) != 0;
+        uint8_t nocp = 0, nocp_s = 0;
+
+        for (int cp = 0; cp < 8; cp++) {
+            if (!(present & (1 << cp)) ||
+                !v7m_cpacr_cp_pass(env, cp, env->v7m.secure, is_priv)) {
+                nocp |= 1 << cp;
+            } else if (arm_feature(env, ARM_FEATURE_M_SECURITY) &&
+                       !env->v7m.secure && !extract32(env->v7m.nsacr, cp, 1)) {
+                nocp_s |= 1 << cp;
+            }
+        }
+        DP_TBFLAG_M32(flags, CP_NOCP, nocp);
+        DP_TBFLAG_M32(flags, CP_NOCP_S, nocp_s);
+    }
     return flags;
 }
 

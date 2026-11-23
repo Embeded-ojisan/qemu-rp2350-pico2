@@ -1775,12 +1775,13 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
         break;
     default:
         /*
-         * ARMv8 defines that only coprocessors 14 and 15 exist,
+         * ARMv8-A defines that only coprocessors 14 and 15 exist,
          * so this can only happen if this is an ARMv7 or earlier CPU,
-         * in which case the syndrome information won't actually be
-         * guest visible.
+         * or M profile, which permits coprocessors 0..7. In both cases
+         * the syndrome information won't actually be guest visible.
          */
-        assert(!arm_dc_feature(s, ARM_FEATURE_V8));
+        assert(!arm_dc_feature(s, ARM_FEATURE_V8) ||
+               arm_dc_feature(s, ARM_FEATURE_M));
         syndrome = syn_uncategorized();
         break;
     }
@@ -6445,6 +6446,8 @@ static void arm_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
         dc->vfp_enabled = 1;
         dc->v7m_handler_mode = EX_TBFLAG_M32(tb_flags, HANDLER);
         dc->v8m_secure = EX_TBFLAG_M32(tb_flags, SECURE);
+        dc->m_cp_nocp = EX_TBFLAG_M32(tb_flags, CP_NOCP);
+        dc->m_cp_nocp_s = EX_TBFLAG_M32(tb_flags, CP_NOCP_S);
         dc->v8m_stackcheck = EX_TBFLAG_M32(tb_flags, STACKCHECK);
         dc->v8m_fpccr_s_wrong = EX_TBFLAG_M32(tb_flags, FPCCR_S_WRONG);
         dc->v7m_new_fp_ctxt_needed =

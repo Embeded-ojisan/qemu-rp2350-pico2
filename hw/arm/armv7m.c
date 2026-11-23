@@ -332,6 +332,11 @@ static void armv7m_realize(DeviceState *dev, Error **errp)
             return;
         }
     }
+    if (s->coprocessors &&
+        !object_property_set_uint(OBJECT(s->cpu), "m-coprocessors",
+                                  s->coprocessors, errp)) {
+        return;
+    }
     object_property_set_bool(OBJECT(s->cpu), "start-powered-off",
                              s->start_powered_off, &error_abort);
 
@@ -562,6 +567,7 @@ static const Property armv7m_properties[] = {
                      false),
     DEFINE_PROP_BOOL("vfp", ARMv7MState, vfp, true),
     DEFINE_PROP_BOOL("dsp", ARMv7MState, dsp, true),
+    DEFINE_PROP_UINT8("coprocessors", ARMv7MState, coprocessors, 0),
     DEFINE_PROP_UINT32("mpu-ns-regions", ARMv7MState, mpu_ns_regions, UINT_MAX),
     DEFINE_PROP_UINT32("mpu-s-regions", ARMv7MState, mpu_s_regions, UINT_MAX),
 };

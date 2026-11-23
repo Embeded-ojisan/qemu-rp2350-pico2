@@ -1216,10 +1216,10 @@ static inline uint32_t v7m_sp_limit(CPUARMState *env)
  * Return true if the v7M CPACR permits access to the FPU for the specified
  * security state and privilege level.
  */
-static inline bool v7m_cpacr_pass(CPUARMState *env,
-                                  bool is_secure, bool is_priv)
+static inline bool v7m_cpacr_cp_pass(CPUARMState *env, int cp,
+                                     bool is_secure, bool is_priv)
 {
-    switch (extract32(env->v7m.cpacr[is_secure], 20, 2)) {
+    switch (extract32(env->v7m.cpacr[is_secure], cp * 2, 2)) {
     case 0:
     case 2: /* UNPREDICTABLE: we treat like 0 */
         return false;
@@ -1230,6 +1230,13 @@ static inline bool v7m_cpacr_pass(CPUARMState *env,
     default:
         g_assert_not_reached();
     }
+}
+
+/* CPACR check for the FP extension (CP10, which also governs CP11) */
+static inline bool v7m_cpacr_pass(CPUARMState *env,
+                                  bool is_secure, bool is_priv)
+{
+    return v7m_cpacr_cp_pass(env, 10, is_secure, is_priv);
 }
 
 /**

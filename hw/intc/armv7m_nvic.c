@@ -1869,14 +1869,24 @@ static void nvic_writel(NVICState *s, uint32_t offset, uint32_t value,
         break;
     case 0xd88: /* CPACR */
         if (cpu_isar_feature(aa32_vfp_simd, cpu)) {
-            /* We implement only the Floating Point extension's CP10/CP11 */
-            cpu->env.v7m.cpacr[attrs.secure] = value & (0xf << 20);
+            /*
+             * We implement the Floating Point extension's CP10/CP11 and
+             * whichever of CP0..CP7 the board provides.
+             */
+            uint32_t mask = 0xf << 20;
+
+            for (int cp = 0; cp < 8; cp++) {
+                if (cpu->m_coprocessors & (1 << cp)) {
+                    mask |= 3 << (cp * 2);
+                }
+            }
+            cpu->env.v7m.cpacr[attrs.secure] = value & mask;
         }
         break;
     case 0xd8c: /* NSACR */
         if (attrs.secure && cpu_isar_feature(aa32_vfp_simd, cpu)) {
-            /* We implement only the Floating Point extension's CP10/CP11 */
-            cpu->env.v7m.nsacr = value & (3 << 10);
+            /* CP10/CP11 and the CP0..CP7 that the board provides */
+            cpu->env.v7m.nsacr = value & ((3 << 10) | cpu->m_coprocessors);
         }
         break;
     case 0xd90: /* MPU_TYPE */
