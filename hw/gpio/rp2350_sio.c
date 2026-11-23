@@ -32,8 +32,6 @@
 
 #define SIO_GPIO_HI_PINS    0x0000ffff  /* GPIO32..47 in the HI registers */
 
-enum { OP_WRITE, OP_SET, OP_CLR, OP_XOR };
-
 static void rp2350_sio_update_out(RP2350SIOState *s, unsigned bank,
                                   uint32_t value)
 {
@@ -52,6 +50,55 @@ static void rp2350_sio_update_out(RP2350SIOState *s, unsigned bank,
     }
 }
 
+uint32_t rp2350_sio_gpio_read(RP2350SIOState *s, unsigned group,
+                              unsigned bank)
+{
+    switch (group) {
+    case RP2350_SIO_GPIO_OUT:
+        return s->gpio_out[bank];
+    case RP2350_SIO_GPIO_OE:
+        return s->gpio_oe[bank];
+    default:
+        /* shortcut: no external inputs; an output-enabled pin reads back */
+        return s->gpio_out[bank] & s->gpio_oe[bank];
+    }
+}
+
+void rp2350_sio_gpio_write(RP2350SIOState *s, unsigned group, unsigned bank,
+                           unsigned op, uint32_t value)
+{
+    uint32_t *reg;
+    uint32_t new;
+
+    if (group == RP2350_SIO_GPIO_OUT) {
+        reg = &s->gpio_out[bank];
+    } else if (group == RP2350_SIO_GPIO_OE) {
+        reg = &s->gpio_oe[bank];
+    } else {
+        return;
+    }
+    switch (op) {
+    case RP2350_SIO_OP_XOR:
+        new = *reg ^ value;
+        break;
+    case RP2350_SIO_OP_SET:
+        new = *reg | value;
+        break;
+    case RP2350_SIO_OP_CLR:
+        new = *reg & ~value;
+        break;
+    default:
+        new = value;
+        break;
+    }
+    if (group == RP2350_SIO_GPIO_OE) {
+        *reg = new;
+        trace_rp2350_sio_gpio_oe(bank, new);
+    } else {
+        rp2350_sio_update_out(s, bank, new);
+    }
+}
+
 static uint64_t rp2350_sio_read(void *opaque, hwaddr offset, unsigned size)
 {
     RP2350SIOState *s = opaque;
@@ -60,11 +107,9 @@ static uint64_t rp2350_sio_read(void *opaque, hwaddr offset, unsigned size)
     case SIO_CPUID:
         return 0;   /* only core 0 is modelled */
     case SIO_GPIO_IN:
-    case SIO_GPIO_HI_IN: {
-        /* shortcut: no external inputs; an output-enabled pin reads back */
-        unsigned bank = (offset - SIO_GPIO_IN) / 4;
-        return s->gpio_out[bank] & s->gpio_oe[bank];
-    }
+    case SIO_GPIO_HI_IN:
+        return rp2350_sio_gpio_read(s, RP2350_SIO_GPIO_IN,
+                                    (offset - SIO_GPIO_IN) / 4);
     case SIO_GPIO_OUT:
     case SIO_GPIO_OUT + 4:
         return s->gpio_out[(offset - SIO_GPIO_OUT) / 4];
@@ -98,33 +143,17 @@ static void rp2350_sio_write(void *opaque, hwaddr offset, uint64_t value,
     RP2350SIOState *s = opaque;
 
     if (offset >= SIO_GPIO_OUT && offset < SIO_GPIO_REG_END) {
+        /* MMIO order: value, SET, CLR, XOR, each as a lo/hi pair */
+        static const unsigned mmio_op[] = {
+            RP2350_SIO_OP_WRITE, RP2350_SIO_OP_SET,
+            RP2350_SIO_OP_CLR, RP2350_SIO_OP_XOR,
+        };
         bool is_oe = offset >= SIO_GPIO_OE;
+        unsigned group = is_oe ? RP2350_SIO_GPIO_OE : RP2350_SIO_GPIO_OUT;
         hwaddr rel = offset - (is_oe ? SIO_GPIO_OE : SIO_GPIO_OUT);
-        unsigned bank = (rel / 4) & 1;
-        unsigned op = rel / 8;
-        uint32_t *reg = is_oe ? &s->gpio_oe[bank] : &s->gpio_out[bank];
-        uint32_t new;
 
-        switch (op) {
-        case OP_SET:
-            new = *reg | value;
-            break;
-        case OP_CLR:
-            new = *reg & ~value;
-            break;
-        case OP_XOR:
-            new = *reg ^ value;
-            break;
-        default:
-            new = value;
-            break;
-        }
-        if (is_oe) {
-            *reg = new;
-            trace_rp2350_sio_gpio_oe(bank, new);
-        } else {
-            rp2350_sio_update_out(s, bank, new);
-        }
+        rp2350_sio_gpio_write(s, group, (rel / 4) & 1, mmio_op[rel / 8],
+                              value);
         return;
     }
 
