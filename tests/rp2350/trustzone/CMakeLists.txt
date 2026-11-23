@@ -10,3 +10,13 @@ add_executable(rp2350_trustzone main.c)
 target_compile_definitions(rp2350_trustzone PRIVATE
     RP2350_TEST_ACCESSCTRL=$<BOOL:${RP2350_TEST_ACCESSCTRL}>)
 target_link_libraries(rp2350_trustzone PRIVATE pico_stdlib hardware_gpio)
+
+option(RP2350_TEST_INTEGRATION "Build the opt-in bus isolation firmware" OFF)
+if(RP2350_TEST_INTEGRATION)
+    foreach(test_case IN ITEMS filter bootram_read bootram_write dma)
+        string(TOUPPER "${test_case}" case_macro)
+        add_executable(rp2350_${test_case} integration.c)
+        target_compile_definitions(rp2350_${test_case} PRIVATE TEST_${case_macro}=1)
+        target_link_libraries(rp2350_${test_case} PRIVATE pico_stdlib)
+    endforeach()
+endif()

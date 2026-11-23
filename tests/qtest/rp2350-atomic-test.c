@@ -26,6 +26,8 @@
 #define SIO_SPINLOCK_ST         0xd000005c
 #define SIO_SPINLOCK0           0xd0000100
 #define SIO_NONSEC_ALIAS        0x00020000
+/* Last 32-bit word of the 1 KiB Boot RAM window. */
+#define BOOTRAM_WORD            0x400e03fc
 
 static void check_all_aliases(uint32_t addr, uint32_t expected)
 {
@@ -82,6 +84,17 @@ static void test_nvic_ictr(void)
     g_assert_cmphex(readl(M33_ICTR), ==, 1);
 }
 
+static void test_bootram_atomic(void)
+{
+    uint32_t saved = readl(BOOTRAM_WORD);
+
+    writel(BOOTRAM_WORD, 0x317f5402);
+    check_all_aliases(BOOTRAM_WORD, 0x317f5402);
+    writel(BOOTRAM_WORD + ALIAS_SET, 1);
+    g_assert_cmphex(readl(BOOTRAM_WORD), ==, 0x317f5403);
+    writel(BOOTRAM_WORD, saved);
+}
+
 static void test_sio_banks(void)
 {
     writel(SIO_GPIO_OUT, 3);
@@ -118,6 +131,7 @@ int main(int argc, char **argv)
     qtest_add_func("/rp2350/atomic/resets", test_resets);
     qtest_add_func("/rp2350/atomic/interposer-pl011", test_interposer_pl011);
     qtest_add_func("/rp2350/nvic/ictr", test_nvic_ictr);
+    qtest_add_func("/rp2350/bootram/atomic", test_bootram_atomic);
     qtest_add_func("/rp2350/sio/banks", test_sio_banks);
 
     qtest_start("-machine raspi-pico2");
