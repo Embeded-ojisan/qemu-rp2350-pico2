@@ -10,6 +10,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
+#include "hw/gpio/rp2350_sio.h"
 #include "hw/misc/rp2350_regs.h"
 #include "migration/vmstate.h"
 #include "trace.h"
@@ -52,36 +53,66 @@
 #define BOOTRAM_BOOTLOCK0       0x80c
 #define BOOTRAM_NUM_BOOTLOCKS   8
 
-static uint64_t rp2350_regs_read(void *opaque, hwaddr addr, unsigned size)
-{
-    RP2350RegsState *s = opaque;
-    RP2350RegsClass *rc = RP2350_REGS_GET_CLASS(s);
-    hwaddr offset = addr & ~3;
-    uint32_t value;
+/* IO_BANK0 and PADS_BANK0 per-pin register layouts */
+#define IO_BANK0_GPIO_STRIDE       8
+#define IO_BANK0_IRQSUMMARY_NS0    0x208
+#define IO_BANK0_IRQSUMMARY_END    0x230
+#define IO_BANK0_IRQ_END           0x320
+#define IO_BANK0_PINS_PER_IRQ_WORD 8
+#define PADS_BANK0_GPIO0           0x004
 
-    value = rc->read ? rc->read(s, offset) : s->regs[offset / 4];
-    trace_rp2350_regs_read(object_get_typename(OBJECT(s)), offset, value);
-    return extract32(value, (addr & 3) * 8, size * 8);
+static uint32_t rp2350_regs_access_mask(RP2350RegsState *s, hwaddr offset,
+                                        MemTxAttrs attrs)
+{
+    RP2350RegsClass *rc = RP2350_REGS_GET_CLASS(s);
+
+    if (rc->nonsecure_mask && !attrs.secure && !attrs.unspecified) {
+        return rc->nonsecure_mask(s, offset);
+    }
+    return UINT32_MAX;
 }
 
-static void rp2350_regs_write(void *opaque, hwaddr addr, uint64_t data,
-                              unsigned size)
+static MemTxResult rp2350_regs_read(void *opaque, hwaddr addr, uint64_t *data,
+                                    unsigned size, MemTxAttrs attrs)
 {
     RP2350RegsState *s = opaque;
     RP2350RegsClass *rc = RP2350_REGS_GET_CLASS(s);
     hwaddr offset = addr & ~3;
-    uint32_t value = deposit32(s->regs[offset / 4], (addr & 3) * 8, size * 8,
-                               data);
+    uint32_t mask = rp2350_regs_access_mask(s, offset, attrs);
+    uint32_t value = 0;
 
+    if (mask) {
+        value = (rc->read ? rc->read(s, offset) : s->regs[offset / 4]) & mask;
+    }
+    trace_rp2350_regs_read(object_get_typename(OBJECT(s)), offset, value);
+    *data = extract32(value, (addr & 3) * 8, size * 8);
+    return MEMTX_OK;
+}
+
+static MemTxResult rp2350_regs_write(void *opaque, hwaddr addr, uint64_t data,
+                                     unsigned size, MemTxAttrs attrs)
+{
+    RP2350RegsState *s = opaque;
+    RP2350RegsClass *rc = RP2350_REGS_GET_CLASS(s);
+    hwaddr offset = addr & ~3;
+    uint32_t mask = rp2350_regs_access_mask(s, offset, attrs);
+    uint32_t old = s->regs[offset / 4];
+    uint32_t value = deposit32(old, (addr & 3) * 8, size * 8, data);
+
+    if (!mask) {
+        return MEMTX_OK;
+    }
+    value = (value & mask) | (old & ~mask);
     trace_rp2350_regs_write(object_get_typename(OBJECT(s)), offset, value);
     if (!rc->write || !rc->write(s, offset, value)) {
         s->regs[offset / 4] = value;
     }
+    return MEMTX_OK;
 }
 
 static const MemoryRegionOps rp2350_regs_ops = {
-    .read = rp2350_regs_read,
-    .write = rp2350_regs_write,
+    .read_with_attrs = rp2350_regs_read,
+    .write_with_attrs = rp2350_regs_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid.min_access_size = 1,
     .valid.max_access_size = 4,
@@ -265,6 +296,61 @@ static void rp2350_ticks_class_init(ObjectClass *klass, const void *data)
     RP2350_REGS_CLASS(klass)->read = rp2350_ticks_read;
 }
 
+static uint32_t rp2350_gpio_pin_mask(RP2350RegsState *s, unsigned pin)
+{
+    return s->gpio_sio->gpio_nsmask[pin / 32] & BIT(pin % 32) ? UINT32_MAX : 0;
+}
+
+static uint32_t rp2350_io_bank0_nonsecure_mask(RP2350RegsState *s,
+                                              hwaddr offset)
+{
+    const uint32_t *mask = s->gpio_sio->gpio_nsmask;
+
+    if (offset < RP2350_SIO_NUM_GPIO * IO_BANK0_GPIO_STRIDE) {
+        return rp2350_gpio_pin_mask(s, offset / IO_BANK0_GPIO_STRIDE);
+    }
+    if (offset >= IO_BANK0_IRQSUMMARY_NS0 && offset < IO_BANK0_IRQSUMMARY_END &&
+        (offset & 8)) {
+        return (offset & 4) ? mask[1] & 0xffff : mask[0];
+    }
+    if (offset >= IO_BANK0_IRQSUMMARY_END && offset < IO_BANK0_IRQ_END) {
+        /* INTR, INTE, INTF and INTS have four bits per GPIO. */
+        unsigned word = ((offset - IO_BANK0_IRQSUMMARY_END) / 4) %
+                        (RP2350_SIO_NUM_GPIO / IO_BANK0_PINS_PER_IRQ_WORD);
+        unsigned pin = word * IO_BANK0_PINS_PER_IRQ_WORD;
+        uint32_t pins = extract32(mask[pin / 32], pin % 32,
+                                  IO_BANK0_PINS_PER_IRQ_WORD);
+        uint32_t visible = 0;
+
+        while (pins) {
+            visible |= 0xfu << (4 * ctz32(pins));
+            pins &= pins - 1;
+        }
+        return visible;
+    }
+    return 0;
+}
+
+static uint32_t rp2350_pads_bank0_nonsecure_mask(RP2350RegsState *s,
+                                                hwaddr offset)
+{
+    if (offset >= PADS_BANK0_GPIO0 &&
+        offset < PADS_BANK0_GPIO0 + 4 * RP2350_SIO_NUM_GPIO) {
+        return rp2350_gpio_pin_mask(s, (offset - PADS_BANK0_GPIO0) / 4);
+    }
+    return 0;
+}
+
+static void rp2350_io_bank0_class_init(ObjectClass *klass, const void *data)
+{
+    RP2350_REGS_CLASS(klass)->nonsecure_mask = rp2350_io_bank0_nonsecure_mask;
+}
+
+static void rp2350_pads_bank0_class_init(ObjectClass *klass, const void *data)
+{
+    RP2350_REGS_CLASS(klass)->nonsecure_mask = rp2350_pads_bank0_nonsecure_mask;
+}
+
 /*
  * BOOTRAM: SRAM, two write-once registers, and the boot locks, which
  * behave like the SIO spinlocks (pico-sdk hardware_regs/bootram.h).
@@ -359,10 +445,12 @@ static const TypeInfo rp2350_regs_types[] = {
         /* shortcut: plain storage; no GPIO interrupts or status */
         .name = TYPE_RP2350_IO_BANK0,
         .parent = TYPE_RP2350_REGS,
+        .class_init = rp2350_io_bank0_class_init,
     }, {
         /* shortcut: plain storage with zero reset values */
         .name = TYPE_RP2350_PADS_BANK0,
         .parent = TYPE_RP2350_REGS,
+        .class_init = rp2350_pads_bank0_class_init,
     }, {
         .name = TYPE_RP2350_BOOTRAM,
         .parent = TYPE_RP2350_REGS,

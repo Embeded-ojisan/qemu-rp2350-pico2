@@ -1,5 +1,5 @@
 /*
- * QTest for the RP2350 atomic register access aliases and NVIC
+ * QTest for the RP2350 atomic aliases, NVIC and SIO banks
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -21,6 +21,11 @@
 #define UART0_UARTIBRD          (0x40070000 + 0x024)
 /* Cortex-M33 ICTR (RP2350 datasheet 3.7.5) */
 #define M33_ICTR                0xe000e004
+#define SIO_GPIO_OUT            0xd0000010
+#define SIO_GPIO_HI_OUT         0xd0000014
+#define SIO_SPINLOCK_ST         0xd000005c
+#define SIO_SPINLOCK0           0xd0000100
+#define SIO_NONSEC_ALIAS        0x00020000
 
 static void check_all_aliases(uint32_t addr, uint32_t expected)
 {
@@ -77,6 +82,32 @@ static void test_nvic_ictr(void)
     g_assert_cmphex(readl(M33_ICTR), ==, 1);
 }
 
+static void test_sio_banks(void)
+{
+    writel(SIO_GPIO_OUT, 3);
+    g_assert_cmphex(readl(SIO_GPIO_OUT + SIO_NONSEC_ALIAS), ==, 0);
+    writel(SIO_GPIO_OUT + SIO_NONSEC_ALIAS, 0);
+    g_assert_cmphex(readl(SIO_GPIO_OUT), ==, 3);
+    writel(SIO_GPIO_HI_OUT, 0xffffffff);
+    g_assert_cmphex(readl(SIO_GPIO_HI_OUT), ==, 0xff00ffff);
+    g_assert_cmphex(readl(SIO_GPIO_HI_OUT + SIO_NONSEC_ALIAS), ==, 0);
+
+    g_assert_cmphex(readl(SIO_SPINLOCK0), ==, 1);
+    g_assert_cmphex(readl(SIO_SPINLOCK_ST + SIO_NONSEC_ALIAS), ==, 0);
+    g_assert_cmphex(readl(SIO_SPINLOCK0 + SIO_NONSEC_ALIAS), ==, 1);
+    g_assert_cmphex(readl(SIO_SPINLOCK0), ==, 0);
+    writel(SIO_SPINLOCK0 + SIO_NONSEC_ALIAS, 0);
+    g_assert_cmphex(readl(SIO_SPINLOCK_ST + SIO_NONSEC_ALIAS), ==, 0);
+    g_assert_cmphex(readl(SIO_SPINLOCK_ST), ==, 1);
+    g_assert_cmphex(readl(SIO_SPINLOCK0 + SIO_NONSEC_ALIAS), ==, 1);
+
+    qtest_system_reset(global_qtest);
+    g_assert_cmphex(readl(SIO_SPINLOCK_ST), ==, 0);
+    g_assert_cmphex(readl(SIO_SPINLOCK_ST + SIO_NONSEC_ALIAS), ==, 0);
+    g_assert_cmphex(readl(SIO_GPIO_OUT), ==, 0);
+    g_assert_cmphex(readl(SIO_GPIO_HI_OUT), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
     int ret;
@@ -87,6 +118,7 @@ int main(int argc, char **argv)
     qtest_add_func("/rp2350/atomic/resets", test_resets);
     qtest_add_func("/rp2350/atomic/interposer-pl011", test_interposer_pl011);
     qtest_add_func("/rp2350/nvic/ictr", test_nvic_ictr);
+    qtest_add_func("/rp2350/sio/banks", test_sio_banks);
 
     qtest_start("-machine raspi-pico2");
     ret = g_test_run();

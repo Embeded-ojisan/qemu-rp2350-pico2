@@ -36,18 +36,24 @@ struct RP2350SIOState {
     MemoryRegion iomem;
     uint32_t gpio_out[2];   /* [0]: GPIO0..31, [1]: GPIO_HI */
     uint32_t gpio_oe[2];
-    uint32_t spinlock_st;
+    uint32_t spinlock_st[2]; /* [0]: Secure, [1]: Non-secure */
+    uint32_t gpio_nsmask[2]; /* ACCESSCTRL GPIO_NSMASK0/1 */
     qemu_irq gpio_out_irq[RP2350_SIO_NUM_GPIO];
 };
 
 /*
  * GPIO register access for the GPIO coprocessor port (datasheet 9.9).
  * @group is RP2350_SIO_GPIO_*, @bank 0 for GPIO0..31 and 1 for GPIO_HI,
- * @op is RP2350_SIO_OP_*. Only OUT and OE can be written.
+ * @op is RP2350_SIO_OP_*. Only OUT and OE can be written. @nonsecure
+ * selects the view filtered by the GPIO assignment.
  */
 uint32_t rp2350_sio_gpio_read(RP2350SIOState *s, unsigned group,
-                              unsigned bank);
+                              unsigned bank, bool nonsecure);
 void rp2350_sio_gpio_write(RP2350SIOState *s, unsigned group, unsigned bank,
-                           unsigned op, uint32_t value);
+                           unsigned op, uint32_t value, bool nonsecure);
+
+/* ACCESSCTRL GPIO_NSMASK0/1. The caller enforces register write permissions. */
+void rp2350_sio_gpio_set_nsmask(RP2350SIOState *s, unsigned bank,
+                               uint32_t mask);
 
 #endif

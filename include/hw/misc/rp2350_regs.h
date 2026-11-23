@@ -34,6 +34,7 @@ struct RP2350RegsState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
+    struct RP2350SIOState *gpio_sio;
     uint32_t regs[RP2350_REGS_NUM_WORDS];
 };
 
@@ -42,6 +43,8 @@ struct RP2350RegsClass {
 
     /* Register values after reset, as (offset, value) pairs ending in 0, 0 */
     const uint32_t *reset_values;
+    /* Optional: bits accessible through a Non-secure transaction. */
+    uint32_t (*nonsecure_mask)(RP2350RegsState *s, hwaddr offset);
     /* Optional: compute the value seen by a read of @offset */
     uint32_t (*read)(RP2350RegsState *s, hwaddr offset);
     /* Optional: handle a write; return false to store it as is */

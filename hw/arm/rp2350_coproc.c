@@ -54,11 +54,12 @@ static void gpioc_reserved(const ARMCPRegInfo *ri, bool isread)
 }
 
 /* Apply @op to OUT or OE with a 64-bit mask (bit n is GPIOn) */
-static void gpioc_write_hilo(RP2350SIOState *sio, unsigned group,
+static void gpioc_write_hilo(CPUARMState *env, unsigned group,
                              unsigned op, uint64_t value)
 {
-    rp2350_sio_gpio_write(sio, group, 0, op, value);
-    rp2350_sio_gpio_write(sio, group, 1, op, value >> 32);
+    rp2350_sio_gpio_write(gpioc_sio, group, 0, op, value, !env->v7m.secure);
+    rp2350_sio_gpio_write(gpioc_sio, group, 1, op, value >> 32,
+                          !env->v7m.secure);
 }
 
 static uint64_t gpioc_bit(uint32_t pin)
@@ -74,7 +75,7 @@ static uint64_t gpioc_read(CPUARMState *env, const ARMCPRegInfo *ri)
         return 0;
     }
     return rp2350_sio_gpio_read(gpioc_sio, GPIOC_GROUP(ri->crm),
-                                GPIOC_BANK(ri->crm));
+                                GPIOC_BANK(ri->crm), !env->v7m.secure);
 }
 
 /* mcr p0, #opc1, Rt, c0, CRm */
@@ -91,7 +92,8 @@ static void gpioc_write(CPUARMState *env, const ARMCPRegInfo *ri,
     }
     switch (GPIOC_MODE(ri->opc1)) {
     case GPIOC_MODE_MASK:
-        rp2350_sio_gpio_write(sio, group, GPIOC_BANK(ri->crm), op, value);
+        rp2350_sio_gpio_write(sio, group, GPIOC_BANK(ri->crm), op, value,
+                              !env->v7m.secure);
         break;
     case GPIOC_MODE_BIT:
         /* bit_xor/set/clr: Rt is a pin number */
@@ -99,7 +101,7 @@ static void gpioc_write(CPUARMState *env, const ARMCPRegInfo *ri,
             gpioc_reserved(ri, false);
             break;
         }
-        gpioc_write_hilo(sio, group, op, gpioc_bit(value));
+        gpioc_write_hilo(env, group, op, gpioc_bit(value));
         break;
     default:
         gpioc_reserved(ri, false);
@@ -116,8 +118,9 @@ static uint64_t gpioc_read64(CPUARMState *env, const ARMCPRegInfo *ri)
         gpioc_reserved(ri, true);
         return 0;
     }
-    return rp2350_sio_gpio_read(gpioc_sio, group, 0) |
-           (uint64_t)rp2350_sio_gpio_read(gpioc_sio, group, 1) << 32;
+    return rp2350_sio_gpio_read(gpioc_sio, group, 0, !env->v7m.secure) |
+           (uint64_t)rp2350_sio_gpio_read(gpioc_sio, group, 1,
+                                          !env->v7m.secure) << 32;
 }
 
 /* mcrr p0, #opc1, Rt, Rt2, CRm: @value is Rt2:Rt */
@@ -137,16 +140,16 @@ static void gpioc_write64(CPUARMState *env, const ARMCPRegInfo *ri,
     switch (GPIOC_MODE(ri->opc1)) {
     case GPIOC_MODE_MASK:
         /* hilo_put/xor/set/clr: Rt to the low, Rt2 to the high register */
-        gpioc_write_hilo(sio, group, op, value);
+        gpioc_write_hilo(env, group, op, value);
         break;
     case GPIOC_MODE_BIT:
         if (op == RP2350_SIO_OP_WRITE) {
             /* bit_put: Rt is the pin, Rt2[0] the value */
             op = (rt2 & 1) ? RP2350_SIO_OP_SET : RP2350_SIO_OP_CLR;
-            gpioc_write_hilo(sio, group, op, gpioc_bit(rt));
+            gpioc_write_hilo(env, group, op, gpioc_bit(rt));
         } else {
             /* bit_xor2/set2/clr2: conditional on Rt2[0] */
-            gpioc_write_hilo(sio, group, op, (rt2 & 1) ? gpioc_bit(rt) : 0);
+            gpioc_write_hilo(env, group, op, (rt2 & 1) ? gpioc_bit(rt) : 0);
         }
         break;
     case GPIOC_MODE_INDEX:
@@ -155,7 +158,7 @@ static void gpioc_write64(CPUARMState *env, const ARMCPRegInfo *ri,
             gpioc_reserved(ri, false);
             break;
         }
-        rp2350_sio_gpio_write(sio, group, rt2, op, rt);
+        rp2350_sio_gpio_write(sio, group, rt2, op, rt, !env->v7m.secure);
         break;
     default:
         gpioc_reserved(ri, false);

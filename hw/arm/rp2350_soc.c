@@ -100,7 +100,6 @@ static const struct {
     { "hstx_fifo",          0x50600000, 0x100000 },
     { "coresight_trace",    0x50700000, 0x100000 },
     { "xip_maintenance",    0x18000000, 0x4000000 },
-    { "sio_nonsec",         0xd0020000, 0x20000 },
 };
 
 static uint64_t rp2350_rom_read(void *opaque, hwaddr addr, unsigned size)
@@ -153,6 +152,8 @@ static void rp2350_init(Object *obj)
                                 rp2350_regs_blocks[i].type);
     }
     object_initialize_child(obj, "sio", &s->sio, TYPE_RP2350_SIO);
+    s->regs[RP2350_REGS_IO_BANK0].gpio_sio = &s->sio;
+    s->regs[RP2350_REGS_PADS_BANK0].gpio_sio = &s->sio;
     object_initialize_child(obj, "timer0", &s->timer0, TYPE_RP2350_TIMER);
     object_initialize_child(obj, "qmi", &s->qmi, TYPE_RP2350_QMI);
     object_initialize_child(obj, "uart0", &s->uart0, TYPE_PL011);
