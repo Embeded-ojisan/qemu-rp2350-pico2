@@ -62,3 +62,6 @@ allwinner_a10_spi_tx(uint8_t byte) "write 0x%02x"
 allwinner_a10_spi_rx(uint8_t byte) "read 0x%02x"
 allwinner_a10_spi_read(const char* regname, uint32_t value) "reg[%s] => 0x%08x"
 allwinner_a10_spi_write(const char* regname, uint32_t value) "reg[%s] <= 0x%08x"
+
+# rp2350_qmi.c
+rp2350_qmi_write(uint64_t offset, uint64_t value) "offset 0x%" PRIx64 " value 0x%" PRIx64
