@@ -118,6 +118,12 @@ config OLIMEX_STM32_H405
     depends on TCG && ARM
     select STM32F405_SOC
 
+config RASPI_PICO2
+    bool
+    default y
+    depends on TCG && ARM
+    select RP2350_SOC
+
 config OMAP
     bool
     select FRAMEBUFFER
@@ -380,6 +386,14 @@ config STM32F405_SOC
     select STM32F2XX_USART
     select STM32F4XX_SYSCFG
     select STM32F4XX_EXTI
+    select UNIMP
+
+config RP2350_SOC
+    bool
+    select ARM_V7M
+    select PL011
+    select SSI
+    select SSI_M25P80
     select UNIMP
 
 config B_L475E_IOT01A

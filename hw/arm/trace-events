@@ -100,3 +100,9 @@ bcm2838_gic_set_irq(int irq, int level) "gic irq:%d lvl:%d"
 # bcm2838_pcie.c
 bcm2838_pcie_host_read(unsigned int size, uint64_t offset, uint64_t value) "%u bytes @ 0x%04"PRIx64": 0x%016"PRIx64
 bcm2838_pcie_host_write(unsigned int size, uint64_t offset, uint64_t value) "%u bytes @ 0x%04"PRIx64": 0x%016"PRIx64
+
+# rp2350_soc.c
+rp2350_stub_rom_block(uint32_t addr) "IMAGE_DEF block at 0x%08x (0: none)"
+rp2350_stub_rom_boot(uint32_t vt) "entering image through vector table 0x%08x"
+rp2350_stub_rom_call(int c1, int c2) "ROM function '%c%c' called"
+rp2350_stub_rom_unimplemented(int c1, int c2) "unimplemented ROM function '%c%c' called"
