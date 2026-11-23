@@ -88,6 +88,7 @@ blobs = [
   'opensbi-riscv64-generic-fw_dynamic.bin',
   'npcm7xx_bootrom.bin',
   'npcm8xx_bootrom.bin',
+  'rp2350-stub-rom.bin',
   'vof.bin',
   'vof-nvram.bin',
 ]
