@@ -14,6 +14,8 @@
 #include "hw/gpio/rp2350_sio.h"
 #include "hw/misc/rp2350_accessctrl.h"
 #include "hw/misc/rp2350_atomic.h"
+#include "hw/misc/rp2350_crypto.h"
+#include "hw/misc/rp2350_otp.h"
 #include "hw/misc/rp2350_regs.h"
 #include "hw/ssi/rp2350_qmi.h"
 #include "hw/timer/rp2350_timer.h"
@@ -46,8 +48,12 @@ enum {
 enum {
     RP2350_ALIAS_UART0 = RP2350_REGS_NUM,
     RP2350_ALIAS_TIMER0,
+    RP2350_ALIAS_TIMER1,
     RP2350_ALIAS_QMI,
     RP2350_ALIAS_DMA,
+    RP2350_ALIAS_TRNG,
+    RP2350_ALIAS_SHA256,
+    RP2350_ALIAS_OTP,
     RP2350_ALIAS_NUM
 };
 
@@ -60,8 +66,11 @@ struct RP2350State {
     RP2350AccessCtrl accessctrl;
     RP2350DMAState dma;
     AddressSpace dma_bus;
-    RP2350TimerState timer0;
+    RP2350TimerState timer[2];
     RP2350QMIState qmi;
+    RP2350TRNGState trng;
+    RP2350SHA256State sha256;
+    RP2350OTPState otp;
     PL011State uart0;
     RP2350AtomicAlias alias[RP2350_ALIAS_NUM];
 

@@ -53,6 +53,9 @@ struct IDAUInterfaceClass {
      */
     void (*check)(IDAUInterface *ii, uint32_t address, int *iregion,
                   bool *exempt, bool *ns, bool *nsc);
+
+    /* Optional: instruction-side bus connectivity, independent of the MPU. */
+    bool (*can_fetch)(IDAUInterface *ii, uint32_t address);
 };
 
 #endif

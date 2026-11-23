@@ -23,6 +23,21 @@
 /* shortcut: blocks must lie in the 4 MB flash of the Pico 2 */
 #define FLASH_SIZE              (4u << 20)
 #define VTOR                    0xe000ed08u
+#define QMI_DIRECT_CSR          0x400d0000u
+#define QMI_DIRECT_TX           0x400d0004u
+#define QMI_DIRECT_RX           0x400d0008u
+#define QMI_EN                  0x1u
+#define QMI_ASSERT_CS0          0x4u
+#define QMI_TX_NOPUSH           0x100000u
+#define TRNG_EHR0               0x400f0114u
+#define TRNG_ENABLE             0x400f012cu
+#define OTP_SW_LOCK             0x40120000u
+#define OTP_PROGRAM             0x40120f00u
+#define OTP_ECC                 0x40130000u
+#define OTP_RAW                 0x40134000u
+#define OTP_WRITE               0x10000u
+#define OTP_ECC_FLAG            0x20000u
+#define OTP_ROWS                4096u
 
 /* pico-sdk picobin.h */
 #define BLOCK_MARKER_START      0xffffded3u
@@ -41,6 +56,8 @@
 
 /* volatile: flash, ROM log ports and VTOR must be accessed as written */
 #define REG32(addr)             (*(volatile uint32_t *)(uintptr_t)(addr))
+/* ECC OTP and its caller buffers use halfword accesses. */
+#define REG16(addr)             (*(volatile uint16_t *)(uintptr_t)(addr))
 
 struct block {
     uint32_t link;          /* byte offset to the next block's header */
@@ -51,6 +68,12 @@ struct block {
 static void stub_log(uint32_t port, uint32_t value)
 {
     REG32(port) = value;
+}
+
+void rom_flash_enter_cmd_xip(void)
+{
+    stub_log(STUB_LOG_CALL, 0x5843);
+    REG32(QMI_DIRECT_CSR) &= ~(QMI_EN | QMI_ASSERT_CS0);
 }
 
 static bool in_flash(uint32_t addr, uint32_t len)
@@ -153,6 +176,17 @@ static uint32_t find_vector_table(void)
 void rom_reset(void) __attribute__((noreturn));
 void rom_reset(void)
 {
+    /* RP2350 pico-sdk copies the XIP restore routine out of BOOTRAM. */
+    REG32(BOOTRAM_BASE) = 0x47004800; /* ldr r0, [pc, #0]; bx r0 */
+    REG32(BOOTRAM_BASE + 4) = (uintptr_t)rom_flash_enter_cmd_xip;
+    REG32(BOOTRAM_FLASH_DEVINFO) = 0x0a00; /* CS0: 4 MB, CS1: absent */
+
+    REG32(TRNG_ENABLE) = 1;
+    for (unsigned i = 0; i < 4; i++) {
+        REG32(BOOTRAM_RANDOM + 4 * i) = REG32(TRNG_EHR0 + 4 * i);
+    }
+    REG32(TRNG_ENABLE) = 0;
+
     uint32_t vt = find_vector_table();
     uint32_t sp = REG32(vt);
     uint32_t pc = REG32(vt + 4);
@@ -206,4 +240,151 @@ void rom_bootrom_state_reset(uint32_t flags)
 {
     (void)flags;
     stub_log(STUB_LOG_CALL, 0x5253);
+}
+
+int rom_get_sys_info(uint32_t *out, uint32_t words, uint32_t flags)
+{
+    stub_log(STUB_LOG_CALL, 0x5347);
+    if (flags != 0x10) { /* SYS_INFO_BOOT_RANDOM */
+        return BOOTROM_ERROR_INVALID_ARG;
+    }
+    if (words < 5) {
+        return BOOTROM_ERROR_BUFFER_TOO_SMALL;
+    }
+    out[0] = flags;
+    for (unsigned i = 0; i < 4; i++) {
+        out[i + 1] = REG32(BOOTRAM_RANDOM + 4 * i);
+    }
+    return 5;
+}
+
+int rom_otp_access(uint8_t *buf, uint32_t len, uint32_t flags)
+{
+    bool write = flags & OTP_WRITE;
+    bool ecc = flags & OTP_ECC_FLAG;
+    unsigned row = flags & 0xffff;
+    unsigned size = ecc ? 2 : 4;
+
+    stub_log(STUB_LOG_CALL, 0x414f);
+    if ((len | (uintptr_t)buf) & (size - 1)) {
+        return BOOTROM_ERROR_BAD_ALIGNMENT;
+    }
+    if (flags >> 18 || row >= OTP_ROWS || len / size > OTP_ROWS - row) {
+        return BOOTROM_ERROR_INVALID_ARG;
+    }
+    /* Check the entire range before programming any row. */
+    for (unsigned i = 0; i < len / size; i++) {
+        unsigned current = row + i;
+        uint32_t lock = REG32(OTP_SW_LOCK + 4 * (current / 64)) & 3;
+
+        if (lock >= 2 || (write && lock)) {
+            return BOOTROM_ERROR_NOT_PERMITTED;
+        }
+        if (write) {
+            uint32_t old = ecc ? REG16(OTP_ECC + 2 * current)
+                               : REG32(OTP_RAW + 4 * current);
+            uint32_t value = ecc ? REG16(buf + 2 * i) : REG32(buf + 4 * i);
+
+            if (old & ~value) {
+                return BOOTROM_ERROR_UNSUPPORTED_MODIFICATION;
+            }
+        }
+    }
+    for (unsigned i = 0; i < len / size; i++, row++, buf += size) {
+        if (write) {
+            REG32(OTP_PROGRAM) = row;
+            REG32(OTP_PROGRAM + 4) = ecc ? REG16(buf) : REG32(buf);
+        } else if (ecc) {
+            REG16(buf) = REG16(OTP_ECC + 2 * row);
+        } else {
+            REG32(buf) = REG32(OTP_RAW + 4 * row);
+        }
+    }
+    return 0;
+}
+
+void rom_connect_internal_flash(void)
+{
+    stub_log(STUB_LOG_CALL, 0x4649);
+}
+
+void rom_flash_exit_xip(void)
+{
+    stub_log(STUB_LOG_CALL, 0x5845);
+    REG32(QMI_DIRECT_CSR) |= QMI_EN;
+}
+
+void rom_flash_flush_cache(void)
+{
+    /* QMI invalidates translated code when XIP is reenabled. */
+    stub_log(STUB_LOG_CALL, 0x4346);
+}
+
+static void flash_select(bool selected)
+{
+    uint32_t csr = REG32(QMI_DIRECT_CSR) & ~QMI_ASSERT_CS0;
+
+    REG32(QMI_DIRECT_CSR) = csr | (selected ? QMI_ASSERT_CS0 : 0);
+}
+
+static void flash_send(uint8_t byte)
+{
+    REG32(QMI_DIRECT_TX) = QMI_TX_NOPUSH | byte;
+}
+
+static void flash_begin_write(uint8_t command, uint32_t offset)
+{
+    flash_select(true);
+    flash_send(0x06); /* WREN */
+    flash_select(false);
+
+    flash_select(true);
+    flash_send(command);
+    flash_send(offset >> 16);
+    flash_send(offset >> 8);
+    flash_send(offset);
+}
+
+static void flash_end_write(void)
+{
+    flash_select(false);
+    flash_select(true);
+    flash_send(0x05); /* RDSR */
+    do {
+        REG32(QMI_DIRECT_TX) = 0;
+    } while (REG32(QMI_DIRECT_RX) & 1);
+    flash_select(false);
+}
+
+void rom_flash_range_erase(uint32_t offset, uint32_t count,
+                           uint32_t block_size, uint8_t block_cmd)
+{
+    (void)block_size;
+    (void)block_cmd;
+    stub_log(STUB_LOG_CALL, 0x4552);
+    if (((offset | count) & 4095) || offset >= FLASH_SIZE ||
+        count > FLASH_SIZE - offset) {
+        return;
+    }
+    for (; count; count -= 4096, offset += 4096) {
+        flash_begin_write(0x20, offset);
+        flash_end_write();
+    }
+}
+
+void rom_flash_range_program(uint32_t offset, const uint8_t *data,
+                              uint32_t count)
+{
+    stub_log(STUB_LOG_CALL, 0x5052);
+    if (((offset | count) & 255) || offset >= FLASH_SIZE ||
+        count > FLASH_SIZE - offset) {
+        return;
+    }
+    for (; count; count -= 256, offset += 256) {
+        flash_begin_write(0x02, offset);
+        for (unsigned i = 0; i < 256; i++) {
+            flash_send(*data++);
+        }
+        flash_end_write();
+    }
 }

@@ -61,4 +61,9 @@ rom_table:
     .hword code, RT_FLAG_FUNC_ARM_SEC, rom_##name + 1;
 #include "rom_funcs.h"
 #undef ROM_FUNC
+    .hword 0x4446, 0x0040, flash_devinfo_ptr /* 'FD', RT_FLAG_DATA */
     .hword 0, 0
+
+    .balign 4
+flash_devinfo_ptr:
+    .word BOOTRAM_FLASH_DEVINFO

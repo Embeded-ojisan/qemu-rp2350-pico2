@@ -3330,6 +3330,18 @@ static bool get_phys_addr_pmsav8(CPUARMState *env,
 
     ret = pmsav8_mpu_lookup(env, address, access_type, ptw->in_prot_check,
                             mmu_idx, secure, result, fi, NULL);
+    if (!ret && env_archcpu(env)->idau) {
+        IDAUInterface *ii = IDAU_INTERFACE(env_archcpu(env)->idau);
+        IDAUInterfaceClass *iic = IDAU_INTERFACE_GET_CLASS(ii);
+
+        if (iic->can_fetch && !iic->can_fetch(ii, address)) {
+            result->f.prot &= ~PAGE_EXEC;
+            if (access_type == MMU_INST_FETCH) {
+                fi->type = ARMFault_SyncExternal;
+                return true;
+            }
+        }
+    }
     /*
      * For two-stage PMSA translations, s2prot holds the stage 2
      * permissions to be combined with stage 1 in get_phys_addr_twostage().

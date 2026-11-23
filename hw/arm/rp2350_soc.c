@@ -20,6 +20,7 @@
 #include "hw/misc/unimp.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
+#include "target/arm/tcg/idau.h"
 #include "trace.h"
 
 /* clk_sys and the SysTick reference as set up by pico-sdk (fixed here) */
@@ -30,6 +31,7 @@
 #define RP2350_TIMER0_IRQ_0     0   /* pico-sdk intctrl.h */
 #define RP2350_DMA_IRQ_0        10
 #define RP2350_UART0_IRQ        33
+#define RP2350_TRNG_IRQ         39
 
 #define RP2350_SIO_BASE         0xd0000000
 
@@ -57,8 +59,12 @@ static const struct {
 static const hwaddr rp2350_alias_base[RP2350_ALIAS_NUM] = {
     [RP2350_ALIAS_UART0]  = 0x40070000,
     [RP2350_ALIAS_TIMER0] = 0x400b0000,
+    [RP2350_ALIAS_TIMER1] = 0x400b8000,
     [RP2350_ALIAS_QMI]    = 0x400d0000,
     [RP2350_ALIAS_DMA]    = 0x50000000,
+    [RP2350_ALIAS_TRNG]   = 0x400f0000,
+    [RP2350_ALIAS_SHA256] = 0x400f8000,
+    [RP2350_ALIAS_OTP]    = 0x40120000,
 };
 
 static const struct {
@@ -79,16 +85,11 @@ static const struct {
     { "i2c1",               0x40098000, 0x8000 },
     { "adc",                0x400a0000, 0x8000 },
     { "pwm",                0x400a8000, 0x8000 },
-    { "timer1",             0x400b8000, 0x8000 },
     { "hstx_ctrl",          0x400c0000, 0x8000 },
     { "xip_ctrl",           0x400c8000, 0x8000 },
     { "watchdog",           0x400d8000, 0x8000 },
     { "rosc",               0x400e8000, 0x8000 },
-    { "trng",               0x400f0000, 0x8000 },
-    { "sha256",             0x400f8000, 0x8000 },
     { "powman",             0x40100000, 0x8000 },
-    { "otp",                0x40120000, 0x10000 },
-    { "otp_data",           0x40130000, 0x10000 },
     { "coresight_periph",   0x40140000, 0x18000 },
     { "glitch_detector",    0x40158000, 0x8000 },
     { "tbman",              0x40160000, 0x8000 },
@@ -159,8 +160,12 @@ static void rp2350_init(Object *obj)
     object_initialize_child(obj, "dma", &s->dma, TYPE_RP2350_DMA);
     s->regs[RP2350_REGS_IO_BANK0].gpio_sio = &s->sio;
     s->regs[RP2350_REGS_PADS_BANK0].gpio_sio = &s->sio;
-    object_initialize_child(obj, "timer0", &s->timer0, TYPE_RP2350_TIMER);
+    object_initialize_child(obj, "timer0", &s->timer[0], TYPE_RP2350_TIMER);
+    object_initialize_child(obj, "timer1", &s->timer[1], TYPE_RP2350_TIMER);
     object_initialize_child(obj, "qmi", &s->qmi, TYPE_RP2350_QMI);
+    object_initialize_child(obj, "trng", &s->trng, TYPE_RP2350_TRNG);
+    object_initialize_child(obj, "sha256", &s->sha256, TYPE_RP2350_SHA256);
+    object_initialize_child(obj, "otp", &s->otp, TYPE_RP2350_OTP);
     object_initialize_child(obj, "uart0", &s->uart0, TYPE_PL011);
 
     /* The clock tree model only reports ready bits; clocks are fixed */
@@ -214,6 +219,7 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
     qdev_prop_set_uint8(armv7m, "coprocessors", RP2350_COPROCESSORS);
     qdev_connect_clock_in(armv7m, "cpuclk", s->sysclk);
     qdev_connect_clock_in(armv7m, "refclk", s->refclk);
+    object_property_set_link(OBJECT(armv7m), "idau", OBJECT(s), &error_abort);
     object_property_set_link(OBJECT(armv7m), "memory",
                              OBJECT(&s->accessctrl.bus), &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(armv7m), errp)) {
@@ -229,6 +235,32 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
                          sysbus_mmio_get_region(sbd, 0),
                          rp2350_regs_blocks[i].base);
     }
+
+    sbd = SYS_BUS_DEVICE(&s->trng);
+    if (!sysbus_realize(sbd, errp)) {
+        return;
+    }
+    rp2350_map_alias(s, RP2350_ALIAS_TRNG, TYPE_RP2350_TRNG,
+                     sysbus_mmio_get_region(sbd, 0),
+                     rp2350_alias_base[RP2350_ALIAS_TRNG]);
+    sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(armv7m, RP2350_TRNG_IRQ));
+
+    sbd = SYS_BUS_DEVICE(&s->sha256);
+    if (!sysbus_realize(sbd, errp)) {
+        return;
+    }
+    rp2350_map_alias(s, RP2350_ALIAS_SHA256, TYPE_RP2350_SHA256,
+                     sysbus_mmio_get_region(sbd, 0),
+                     rp2350_alias_base[RP2350_ALIAS_SHA256]);
+
+    sbd = SYS_BUS_DEVICE(&s->otp);
+    if (!sysbus_realize(sbd, errp)) {
+        return;
+    }
+    rp2350_map_alias(s, RP2350_ALIAS_OTP, TYPE_RP2350_OTP,
+                     sysbus_mmio_get_region(sbd, 0),
+                     rp2350_alias_base[RP2350_ALIAS_OTP]);
+    sysbus_mmio_map(sbd, 1, 0x40130000);
 
     sbd = SYS_BUS_DEVICE(&s->dma);
     address_space_init(&s->dma_bus, MEMORY_REGION(&s->accessctrl.bus),
@@ -256,16 +288,20 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(sbd, 0, RP2350_SIO_BASE);
     rp2350_coproc_init(s->armv7m.cpu, &s->sio);
 
-    sbd = SYS_BUS_DEVICE(&s->timer0);
-    if (!sysbus_realize(sbd, errp)) {
-        return;
-    }
-    rp2350_map_alias(s, RP2350_ALIAS_TIMER0, "rp2350-timer0",
-                     sysbus_mmio_get_region(sbd, 0),
-                     rp2350_alias_base[RP2350_ALIAS_TIMER0]);
-    for (int i = 0; i < RP2350_TIMER_NUM_ALARMS; i++) {
-        sysbus_connect_irq(sbd, i,
-                           qdev_get_gpio_in(armv7m, RP2350_TIMER0_IRQ_0 + i));
+    for (unsigned n = 0; n < ARRAY_SIZE(s->timer); n++) {
+        unsigned alias = RP2350_ALIAS_TIMER0 + n;
+        unsigned irq = RP2350_TIMER0_IRQ_0 + n * RP2350_TIMER_NUM_ALARMS;
+
+        sbd = SYS_BUS_DEVICE(&s->timer[n]);
+        if (!sysbus_realize(sbd, errp)) {
+            return;
+        }
+        rp2350_map_alias(s, alias, n ? "rp2350-timer1" : "rp2350-timer0",
+                         sysbus_mmio_get_region(sbd, 0),
+                         rp2350_alias_base[alias]);
+        for (unsigned i = 0; i < RP2350_TIMER_NUM_ALARMS; i++) {
+            sysbus_connect_irq(sbd, i, qdev_get_gpio_in(armv7m, irq + i));
+        }
     }
 
     sbd = SYS_BUS_DEVICE(&s->uart0);
@@ -309,13 +345,33 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
     }
 }
 
+static bool rp2350_idau_can_fetch(IDAUInterface *ii, uint32_t address)
+{
+    unsigned segment = address >> 28;
+
+    return segment != 4 && segment != 5 && segment != 0xd;
+}
+
+static void rp2350_idau_check(IDAUInterface *ii, uint32_t address,
+                              int *region, bool *exempt, bool *ns, bool *nsc)
+{
+    /* Datasheet 10.2.2. The stub ROM contains no NSBOOT or SG code. */
+    *exempt = !rp2350_idau_can_fetch(ii, address) || address < RP2350_ROM_SIZE;
+    *region = IREGION_NOTVALID;
+    *ns = true;
+    *nsc = false;
+}
+
 static void rp2350_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    IDAUInterfaceClass *iic = IDAU_INTERFACE_CLASS(klass);
 
     dc->realize = rp2350_realize;
     /* Reason: uses serial_hd() and get_system_memory() */
     dc->user_creatable = false;
+    iic->check = rp2350_idau_check;
+    iic->can_fetch = rp2350_idau_can_fetch;
 }
 
 static const TypeInfo rp2350_types[] = {
@@ -325,6 +381,10 @@ static const TypeInfo rp2350_types[] = {
         .instance_size = sizeof(RP2350State),
         .instance_init = rp2350_init,
         .class_init = rp2350_class_init,
+        .interfaces = (const InterfaceInfo[]) {
+            { TYPE_IDAU_INTERFACE },
+            { }
+        },
     },
 };
 

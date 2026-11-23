@@ -59,6 +59,32 @@
 #define DMA_WRITE_ERROR        BIT(29)
 #define DMA_READ_ERROR         BIT(30)
 #define DMA_AHB_ERROR          BIT(31)
+#define QMI_CSR                0x400d0000
+#define QMI_TX                 0x400d0004
+#define QMI_RX                 0x400d0008
+#define QMI_EN                 BIT(0)
+#define QMI_CS0                BIT(2)
+#define QMI_RXEMPTY            BIT(16)
+#define QMI_DWIDTH             BIT(18)
+#define QMI_NOPUSH             BIT(20)
+#define XIP_BASE               0x10000000
+#define XIP_NOCACHE            0x14000000
+#define XIP_NOTRANSLATE        0x1c000000
+#define TRNG_ISR               0x400f0104
+#define TRNG_ICR               0x400f0108
+#define TRNG_VALID             0x400f0110
+#define TRNG_EHR0              0x400f0114
+#define TRNG_ENABLE            0x400f012c
+#define SHA_CSR                0x400f8000
+#define SHA_WDATA              0x400f8004
+#define SHA_SUM0               0x400f8008
+#define OTP_LOCK3              0x4012000c
+#define OTP_PROGRAM_ROW        0x40120f00
+#define OTP_PROGRAM_DATA       0x40120f04
+#define OTP_DATA3              (0x40130000 + 0xc0 * 2)
+#define OTP_GUARDED3           (0x40138000 + 0xc0 * 2)
+#define TIMER0_RAW_LO          0x400b0028
+#define TIMER1_RAW_LO          0x400b8028
 
 enum {
     CPU0 = 0, DMA_MASTER = 2,
@@ -175,6 +201,152 @@ static void bus_write(uint64_t addr, unsigned flags, unsigned requester,
                                     true, &value);
 
     g_assert_cmpint(result == 0, ==, allowed);
+}
+
+static void qmi_begin_command(uint8_t command)
+{
+    writel(QMI_CSR, QMI_EN | QMI_CS0);
+    writel(QMI_TX, QMI_NOPUSH | command);
+}
+
+static void test_qmi_direct(void)
+{
+    const uint32_t offset = 0x3f0000;
+
+    g_assert_cmphex(readl(XIP_BASE + offset), ==, 0xffffffff);
+    writel(QMI_CSR, QMI_EN);
+    bus_read(XIP_BASE + offset, ATTR_SECURE, CPU0, false);
+    bus_read(XIP_NOCACHE + offset, ATTR_SECURE, CPU0, false);
+    bus_read(XIP_NOTRANSLATE + offset, ATTR_SECURE, CPU0, false);
+
+    writel(QMI_CSR, QMI_EN | QMI_CS0);
+    writel(QMI_TX, QMI_DWIDTH | 0x9f); /* JEDEC ID, command then dummy */
+    g_assert_cmphex(readl(QMI_RX) >> 8, ==, 0xef);
+    writel(QMI_TX, 0);
+    writel(QMI_TX, 0);
+    g_assert_cmphex(readl(QMI_RX), ==, 0x40);
+    g_assert_cmphex(readl(QMI_RX), ==, 0x16);
+    g_assert_true(readl(QMI_CSR) & QMI_RXEMPTY);
+    writel(QMI_CSR, QMI_EN);
+
+    qmi_begin_command(0x06); /* WREN */
+    writel(QMI_CSR, QMI_EN);
+    qmi_begin_command(0x02); /* PAGE PROGRAM */
+    writel(QMI_TX, QMI_NOPUSH | (offset >> 16));
+    writel(QMI_TX, QMI_NOPUSH);
+    writel(QMI_TX, QMI_NOPUSH);
+    writel(QMI_TX, QMI_NOPUSH | 0x12);
+    writel(QMI_CSR, 0);
+    g_assert_cmphex(readl(XIP_BASE + offset), ==, 0xffffff12);
+    g_assert_cmphex(readl(XIP_NOCACHE + offset), ==, 0xffffff12);
+    g_assert_cmphex(readl(XIP_NOTRANSLATE + offset), ==, 0xffffff12);
+
+    qmi_begin_command(0x06);
+    writel(QMI_CSR, QMI_EN);
+    qmi_begin_command(0x20); /* SECTOR ERASE */
+    writel(QMI_TX, QMI_NOPUSH | (offset >> 16));
+    writel(QMI_TX, QMI_NOPUSH);
+    writel(QMI_TX, QMI_NOPUSH);
+    writel(QMI_CSR, 0);
+    g_assert_cmphex(readl(XIP_BASE + offset), ==, 0xffffffff);
+}
+
+static void test_trng(void)
+{
+    uint32_t samples[2][6];
+
+    g_assert_cmphex(readl(TRNG_VALID), ==, 0);
+    writel(TRNG_ENABLE, 1);
+    g_assert_cmphex(readl(TRNG_VALID), ==, 1);
+    g_assert_cmphex(readl(TRNG_ISR), ==, 1);
+    writel(TRNG_ICR, 1);
+    g_assert_cmphex(readl(TRNG_ISR), ==, 0);
+    for (unsigned j = 0; j < ARRAY_SIZE(samples); j++) {
+        for (unsigned i = 0; i < ARRAY_SIZE(samples[j]); i++) {
+            samples[j][i] = readl(TRNG_EHR0 + 4 * i);
+        }
+    }
+    g_assert_cmpint(memcmp(samples[0], samples[1], sizeof(samples[0])), !=, 0);
+    g_assert_cmphex(readl(TRNG_ISR), ==, 1);
+    writel(TRNG_ENABLE, 0);
+    g_assert_cmphex(readl(TRNG_VALID), ==, 0);
+}
+
+static void test_sha256(void)
+{
+    const uint32_t expected[] = {
+        0xba7816bf, 0x8f01cfea, 0x414140de, 0x5dae2223,
+        0xb00361a3, 0x96177a9c, 0xb410ff61, 0xf20015ad,
+    };
+    const uint32_t two_blocks[] = {
+        0x248d6a61, 0xd20638b8, 0xe5c02693, 0x0c3e6039,
+        0xa33ce459, 0x64ff2167, 0xf6ecedd4, 0x19db06c1,
+    };
+    /* FIPS test message followed by padding and its 448-bit length. */
+    const uint8_t message[128] = {
+        "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq\x80"
+    };
+
+    for (unsigned swap = 0; swap < 2; swap++) {
+        uint32_t first = swap ? 0x80636261 : 0x61626380;
+        uint32_t last = swap ? 0x18000000 : 0x18;
+
+        writel(SHA_CSR, 0x201 | (swap << 12));
+        g_assert_cmphex(readl(SHA_CSR) & 7, ==, 6);
+        writel(SHA_WDATA, first);
+        g_assert_cmphex(readl(SHA_CSR) & 7, ==, 2);
+        for (unsigned i = 1; i < 15; i++) {
+            writel(SHA_WDATA, 0);
+        }
+        writel(SHA_WDATA, last);
+        g_assert_cmphex(readl(SHA_CSR) & 7, ==, 6);
+        for (unsigned i = 0; i < ARRAY_SIZE(expected); i++) {
+            g_assert_cmphex(readl(SHA_SUM0 + 4 * i), ==, expected[i]);
+        }
+    }
+
+    writel(SHA_CSR, 0x1201);
+    for (unsigned i = 0; i < 126; i++) {
+        writeb(SHA_WDATA, message[i]);
+    }
+    writeb(SHA_WDATA, 1);
+    writeb(SHA_WDATA, 0xc0);
+    for (unsigned i = 0; i < ARRAY_SIZE(two_blocks); i++) {
+        g_assert_cmphex(readl(SHA_SUM0 + 4 * i), ==, two_blocks[i]);
+    }
+}
+
+static void test_otp(void)
+{
+    g_assert_cmphex(readl(OTP_DATA3), ==, 0);
+    writel(OTP_PROGRAM_ROW, 0xc0);
+    writel(OTP_PROGRAM_DATA, 0x1234);
+    writel(OTP_PROGRAM_DATA, 0x4020);
+    g_assert_cmphex(readl(OTP_DATA3), ==, 0x5234);
+
+    writel(OTP_LOCK3, 1);
+    bus_write(OTP_PROGRAM_DATA, ATTR_SECURE, CPU0, 0xffff, false);
+    g_assert_cmphex(readl(OTP_DATA3), ==, 0x5234);
+    qtest_system_reset(global_qtest);
+    g_assert_cmphex(readl(OTP_LOCK3), ==, 0);
+    g_assert_cmphex(readl(OTP_DATA3), ==, 0x5234);
+
+    writel(OTP_PROGRAM_ROW, 0xf81 + 2 * 3);
+    writel(OTP_PROGRAM_DATA, 0x000303);
+    qtest_system_reset(global_qtest);
+    g_assert_cmphex(readl(OTP_LOCK3), ==, 3);
+    g_assert_cmphex(readl(OTP_DATA3), ==, 0xffffffff);
+    bus_read(OTP_GUARDED3, ATTR_SECURE, CPU0, false);
+}
+
+static void test_timers(void)
+{
+    uint32_t timer0 = readl(TIMER0_RAW_LO);
+    uint32_t timer1 = readl(TIMER1_RAW_LO);
+
+    qtest_clock_step(global_qtest, 100000);
+    g_assert_cmpuint(readl(TIMER0_RAW_LO) - timer0, ==, 100);
+    g_assert_cmpuint(readl(TIMER1_RAW_LO) - timer1, ==, 100);
 }
 
 static void set_acl(uint32_t addr, uint32_t value)
@@ -411,6 +583,11 @@ int main(int argc, char **argv)
     qtest_add_func("/rp2350/accessctrl/exceptions",
                    test_bus_exceptions_and_stripes);
     qtest_add_func("/rp2350/dma/mpu", test_dma_mpu);
+    qtest_add_func("/rp2350/qmi/direct", test_qmi_direct);
+    qtest_add_func("/rp2350/trng/entropy", test_trng);
+    qtest_add_func("/rp2350/sha256/abc", test_sha256);
+    qtest_add_func("/rp2350/otp/locks-reset", test_otp);
+    qtest_add_func("/rp2350/timer/two-instances", test_timers);
 
     qtest_start("-machine raspi-pico2");
     ret = g_test_run();

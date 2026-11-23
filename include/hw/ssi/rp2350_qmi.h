@@ -19,6 +19,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(RP2350QMIState, RP2350_QMI)
 #define RP2350_QMI_NUM_CS       2
 #define RP2350_QMI_CS_WINDOW    (16 * MiB)
 #define RP2350_QMI_NUM_REGS     (0x54 / 4)
+#define RP2350_QMI_RX_DEPTH     4
 
 struct RP2350QMIState {
     SysBusDevice parent_obj;
@@ -31,6 +32,8 @@ struct RP2350QMIState {
     SSIBus *ssi;
     qemu_irq cs_lines[RP2350_QMI_NUM_CS];
     uint32_t regs[RP2350_QMI_NUM_REGS];
+    uint16_t rx[RP2350_QMI_RX_DEPTH];
+    uint8_t rx_count;
 };
 
 /*
