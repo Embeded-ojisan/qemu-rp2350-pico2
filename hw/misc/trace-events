@@ -474,3 +474,7 @@ restore_host_x86_igvm(void) ""
 # tt_atlantis_prcm.c
 tt_atlantis_prcm_read(uint32_t domain, uint64_t offset, uint64_t data) "domain 0x%02x offset 0x%" PRIx64 " data 0x%" PRIx64
 tt_atlantis_prcm_write(uint32_t domain, uint64_t offset, uint64_t data) "domain 0x%02x offset 0x%" PRIx64 " data 0x%" PRIx64
+
+# rp2350_atomic.c
+rp2350_atomic_write(const char *name, unsigned alias, uint64_t offset, uint64_t old, uint64_t value) "%s alias %u offset 0x%" PRIx64 " old 0x%" PRIx64 " new 0x%" PRIx64
+
