@@ -36,6 +36,7 @@
 #define ACL_SRAM0              0x4006001c
 #define ACL_SRAM9              0x40060040
 #define ACL_DMA                0x40060044
+#define ACL_PIO0               0x4006004c
 #define ACL_RESETS             0x40060064
 #define ACL_UART0              0x400600a0
 #define ACL_KEY                0xacce0000
@@ -47,15 +48,29 @@
 #define DMA_WRITE              (DMA_BASE + 0x004)
 #define DMA_COUNT              (DMA_BASE + 0x008)
 #define DMA_CTRL               (DMA_BASE + 0x00c)
+#define DMA_AL1_CTRL           (DMA_BASE + 0x010)
+#define DMA_CH_STRIDE          0x040
 #define DMA_INTR               (DMA_BASE + 0x400)
 #define DMA_IRQ_ENABLE         (DMA_BASE + 0x404)
 #define DMA_IRQ_STATUS         (DMA_BASE + 0x40c)
+#define DMA_PACING(n)          (DMA_BASE + 0x440 + 4 * (n))
+#define DMA_ABORT              (DMA_BASE + 0x464)
 #define DMA_SEC_CH0            (DMA_BASE + 0x480)
+#define DMA_SEC_MISC           (DMA_BASE + 0x4d0)
 #define DMA_MPU_CTRL           (DMA_BASE + 0x500)
 #define DMA_MPU_BAR0           (DMA_BASE + 0x504)
 #define DMA_MPU_LAR0           (DMA_BASE + 0x508)
 #define DMA_MPU_BAR1           (DMA_BASE + 0x50c)
 #define DMA_MPU_LAR1           (DMA_BASE + 0x510)
+#define DMA_ENABLE             BIT(0)
+#define DMA_WORD               BIT(3)
+#define DMA_INCR_READ          BIT(4)
+#define DMA_INCR_WRITE         BIT(6)
+#define DMA_CHAIN_TO(n)        ((n) << 13)
+#define DMA_TREQ(n)            ((n) << 17)
+#define DMA_TREQ_TIMER(n)      DMA_TREQ(0x3b + (n))
+#define DMA_TREQ_FORCE         DMA_TREQ(0x3f)
+#define DMA_BUSY               BIT(26)
 #define DMA_WRITE_ERROR        BIT(29)
 #define DMA_READ_ERROR         BIT(30)
 #define DMA_AHB_ERROR          BIT(31)
@@ -91,11 +106,13 @@
 #define PIO_FDEBUG             (PIO0_BASE + 0x008)
 #define PIO_FLEVEL             (PIO0_BASE + 0x00c)
 #define PIO_TXF0               (PIO0_BASE + 0x010)
+#define PIO_DBG_PADOUT         (PIO0_BASE + 0x03c)
 #define PIO_IMEM(n)            (PIO0_BASE + 0x048 + 4 * (n))
 #define PIO_SM0_SHIFTCTRL      (PIO0_BASE + 0x0d0)
 #define PIO_SM0_ADDR           (PIO0_BASE + 0x0d4)
 #define PIO_SM0_INSTR          (PIO0_BASE + 0x0d8)
 #define PIO_SM0_PINCTRL        (PIO0_BASE + 0x0dc)
+#define PIO_SM_STRIDE          0x018
 #define PIO_TX0_EMPTY          BIT(24)
 #define PIO_TX0_STALL          BIT(24)
 #define PIO0_RESET             BIT(11)
@@ -512,13 +529,19 @@ static void test_bus_exceptions_and_stripes(void)
     writel(ACL_CFGRESET, ACL_KEY | 1);
 }
 
-static void dma_copy(uint32_t src, uint32_t dest, unsigned count)
+static void dma_start(uint32_t src, uint32_t dest, unsigned count,
+                      uint32_t ctrl)
 {
     writel(DMA_READ, src);
     writel(DMA_WRITE, dest);
     writel(DMA_COUNT, count);
-    /* Enable, word size, increment both addresses, permanent request. */
-    writel(DMA_CTRL, 0x007e0059);
+    writel(DMA_CTRL, DMA_ENABLE | DMA_WORD | ctrl);
+}
+
+static void dma_copy(uint32_t src, uint32_t dest, unsigned count)
+{
+    dma_start(src, dest, count,
+              DMA_INCR_READ | DMA_INCR_WRITE | DMA_TREQ_FORCE);
     qtest_clock_step(global_qtest, 10);
 }
 
@@ -584,6 +607,271 @@ static void test_dma_mpu(void)
     writel(RESETS_RESET + ALIAS_CLR, BIT(2));
     g_assert_cmphex(readl(DMA_SEC_CH0), ==, 3);
     g_assert_cmphex(readl(DMA_MPU_LAR0), ==, 0);
+}
+
+static void test_dma_pio_tx(void)
+{
+    const uint32_t data[] = {
+        1, 0x3456, 0x89abcdef, 0x44226688, 0x8765, 7, 0xaaaa, 8, 0xbbb, 0xc,
+    };
+
+    for (unsigned sm = 0; sm < 4; sm++) {
+        unsigned shift = 8 * sm;
+        unsigned sm_offset = PIO_SM_STRIDE * sm;
+        bool joined = sm & 1;
+        unsigned depth = joined ? 8 : 4;
+        unsigned words = depth + 2;
+
+        qtest_system_reset(global_qtest);
+        writel(RESETS_RESET + ALIAS_CLR, BIT(2));
+        writel(DMA_IRQ_ENABLE, 1);
+        for (unsigned i = 0; i < words; i++) {
+            writel(SRAM9_WORD + 4 * i, data[i]);
+        }
+        dma_start(SRAM9_WORD, PIO_TXF0 + 4 * sm, words,
+                  DMA_INCR_READ | DMA_TREQ(sm));
+        qtest_clock_step(global_qtest, 100);
+        g_assert_cmpuint(readl(DMA_COUNT), ==, words);
+
+        writel(RESETS_RESET + ALIAS_CLR, PIO0_RESET);
+        if (joined) {
+            writel(PIO_SM0_SHIFTCTRL + sm_offset + ALIAS_SET, BIT(30));
+        }
+        qtest_clock_step(global_qtest, 100);
+        g_assert_cmphex(readl(PIO_FLEVEL), ==, depth << shift);
+        g_assert_cmpuint(readl(DMA_COUNT), ==, 2);
+        g_assert_cmphex(readl(DMA_CTRL) & DMA_BUSY, ==, DMA_BUSY);
+        g_assert_cmphex(readl(DMA_IRQ_STATUS), ==, 0);
+
+        writel(PIO_SM0_PINCTRL + sm_offset, 32u << 20);
+        writel(PIO_IMEM(0), 0x80a0); /* PULL BLOCK */
+        writel(PIO_IMEM(1), 0x6000); /* OUT PINS, 32 */
+        writel(PIO_IMEM(2), 0x0002); /* JMP 2 */
+        writel(PIO_CTRL + ALIAS_SET, BIT(sm));
+        qtest_clock_step(global_qtest, 50);
+        writel(PIO_CTRL + ALIAS_CLR, BIT(sm));
+        g_assert_cmphex(readl(PIO_DBG_PADOUT), ==, data[0]);
+        g_assert_cmphex(readl(PIO_FLEVEL), ==, depth << shift);
+        g_assert_cmpuint(readl(DMA_COUNT), ==, 1);
+        g_assert_cmphex(readl(DMA_IRQ_STATUS), ==, 0);
+
+        for (unsigned i = 1; i < words; i++) {
+            writel(PIO_SM0_INSTR + sm_offset, 0x80a0);
+            writel(PIO_SM0_INSTR + sm_offset, 0x6000);
+            qtest_clock_step(global_qtest, 20);
+            g_assert_cmphex(readl(PIO_DBG_PADOUT), ==, data[i]);
+        }
+        g_assert_cmphex(readl(PIO_FLEVEL), ==, 0);
+        g_assert_cmphex(readl(PIO_FDEBUG), ==, 0);
+        g_assert_cmphex(readl(DMA_READ), ==, SRAM9_WORD + 4 * words);
+        g_assert_cmphex(readl(DMA_WRITE), ==, PIO_TXF0 + 4 * sm);
+        g_assert_cmphex(readl(DMA_CTRL) & DMA_BUSY, ==, 0);
+        g_assert_cmpuint(readl(DMA_COUNT), ==, 0);
+        g_assert_cmphex(readl(DMA_IRQ_STATUS), ==, 1);
+    }
+}
+
+static void test_dma_pio_tx_access(void)
+{
+    qtest_system_reset(global_qtest);
+    writel(RESETS_RESET + ALIAS_CLR, BIT(2) | PIO0_RESET);
+    writel(DMA_SEC_CH0, 1); /* NSP channel */
+    writel(SRAM9_WORD, 0x12345678);
+    dma_start(SRAM9_WORD, PIO_TXF0, 1, DMA_TREQ(0));
+    qtest_clock_step(global_qtest, 100);
+    g_assert_cmpuint(readl(DMA_COUNT), ==, 1);
+    g_assert_cmphex(readl(DMA_CTRL) & DMA_AHB_ERROR, ==, 0);
+
+    set_acl(ACL_PIO0, 0xfd); /* NSU without NSP is ineffective. */
+    qtest_clock_step(global_qtest, 100);
+    g_assert_cmphex(readl(DMA_CTRL) & DMA_BUSY, ==, DMA_BUSY);
+    g_assert_cmphex(readl(PIO_FLEVEL), ==, 0);
+
+    set_acl(ACL_PIO0, 0x1a); /* NSP DREQ is visible, DMA bus port is denied. */
+    qtest_clock_step(global_qtest, 100);
+    g_assert_cmphex(readl(DMA_CTRL) & (DMA_AHB_ERROR | DMA_WRITE_ERROR),
+                    ==, DMA_AHB_ERROR | DMA_WRITE_ERROR);
+    g_assert_cmphex(readl(PIO_FLEVEL), ==, 0);
+
+    set_acl(ACL_PIO0, 0x5a);
+    writel(DMA_CTRL, DMA_WRITE_ERROR);
+    writel(DMA_MPU_BAR0, PIO_TXF0 & ~31u);
+    writel(DMA_MPU_LAR0, (PIO_TXF0 & ~31u) | 7); /* SP-only destination */
+    dma_start(SRAM9_WORD, PIO_TXF0, 1, DMA_TREQ(0));
+    qtest_clock_step(global_qtest, 100);
+    g_assert_cmphex(readl(DMA_CTRL) & DMA_WRITE_ERROR, ==, DMA_WRITE_ERROR);
+    g_assert_cmphex(readl(PIO_FLEVEL), ==, 0);
+
+    writel(DMA_CTRL, DMA_WRITE_ERROR);
+    writel(DMA_MPU_LAR0, 0);
+    dma_start(SRAM9_WORD, PIO_TXF0, 1, DMA_TREQ(0));
+    qtest_clock_step(global_qtest, 100);
+    g_assert_cmpuint(readl(DMA_COUNT), ==, 0);
+    g_assert_cmphex(readl(PIO_FLEVEL), ==, 1);
+}
+
+static void test_dma_pacing(void)
+{
+    const unsigned delays[] = { 27, 20, 20 }; /* X/Y = 3/10 at 150 MHz */
+
+    for (unsigned timer = 0; timer < 4; timer++) {
+        qtest_system_reset(global_qtest);
+        writel(RESETS_RESET + ALIAS_CLR, BIT(2));
+        writel(DMA_PACING(timer), (3u << 16) | 10);
+        g_assert_cmphex(readl(DMA_PACING(timer)), ==, (3u << 16) | 10);
+        for (unsigned i = 0; i < ARRAY_SIZE(delays); i++) {
+            writel(SRAM9_WORD + 4 * i, i + 1);
+            writel(SRAM8_WORD + 4 * i, 0);
+        }
+        dma_start(SRAM9_WORD, SRAM8_WORD, ARRAY_SIZE(delays),
+                  DMA_INCR_READ | DMA_INCR_WRITE | DMA_TREQ_TIMER(timer));
+
+        for (unsigned i = 0; i < ARRAY_SIZE(delays); i++) {
+            qtest_clock_step(global_qtest, delays[i] - 1);
+            g_assert_cmpuint(readl(DMA_COUNT), ==, ARRAY_SIZE(delays) - i);
+            g_assert_cmphex(readl(SRAM8_WORD + 4 * i), ==, 0);
+            qtest_clock_step(global_qtest, 1);
+            g_assert_cmpuint(readl(DMA_COUNT), ==, ARRAY_SIZE(delays) - i - 1);
+            g_assert_cmphex(readl(SRAM8_WORD + 4 * i), ==, i + 1);
+        }
+        g_assert_cmphex(readl(DMA_CTRL) & DMA_BUSY, ==, 0);
+        g_assert_cmphex(readl(DMA_INTR), ==, 1);
+    }
+}
+
+static void test_dma_pacing_stop(void)
+{
+    uint32_t ctrl = DMA_INCR_WRITE | DMA_TREQ_TIMER(0);
+    uint32_t ratio = (1u << 16) | 150; /* 1 us per request */
+
+    qtest_system_reset(global_qtest);
+    writel(RESETS_RESET + ALIAS_CLR, BIT(2));
+    writel(SRAM9_WORD, 0x2a);
+    writel(SRAM8_WORD, 0);
+    writel(SRAM8_WORD + 4, 0);
+    dma_start(SRAM9_WORD, SRAM8_WORD, 2, DMA_TREQ(4)); /* PIO0 RX0 */
+    qtest_clock_step(global_qtest, 2000);
+    g_assert_cmpuint(readl(DMA_COUNT), ==, 2);
+    writel(DMA_ABORT, 1);
+
+    dma_start(SRAM9_WORD, SRAM8_WORD, 2, ctrl);
+    writel(DMA_PACING(0), 150); /* Zero X */
+    qtest_clock_step(global_qtest, 2000);
+    writel(DMA_PACING(0), 1u << 16); /* Zero Y */
+    qtest_clock_step(global_qtest, 2000);
+    g_assert_cmpuint(readl(DMA_COUNT), ==, 2);
+    g_assert_cmphex(readl(SRAM8_WORD), ==, 0);
+
+    writel(DMA_PACING(0), ratio);
+    qtest_clock_step(global_qtest, 1000);
+    g_assert_cmpuint(readl(DMA_COUNT), ==, 1);
+    g_assert_cmphex(readl(SRAM8_WORD), ==, 0x2a);
+    writel(DMA_CTRL + ALIAS_CLR, DMA_ENABLE);
+    qtest_clock_step(global_qtest, 3000);
+    g_assert_cmphex(readl(DMA_CTRL) & DMA_BUSY, ==, DMA_BUSY);
+    g_assert_cmpuint(readl(DMA_COUNT), ==, 1);
+    writel(DMA_CTRL + ALIAS_SET, DMA_ENABLE);
+    qtest_clock_step(global_qtest, 1000);
+    g_assert_cmphex(readl(SRAM8_WORD + 4), ==, 0x2a);
+    g_assert_cmpuint(readl(DMA_COUNT), ==, 0);
+
+    writel(DMA_INTR, 1);
+    writel(SRAM8_WORD, 0);
+    dma_start(SRAM9_WORD, SRAM8_WORD, 1, ctrl);
+    qtest_clock_step(global_qtest, 999);
+    writel(DMA_PACING(0), 0);
+    qtest_clock_step(global_qtest, 1000);
+    g_assert_cmpuint(readl(DMA_COUNT), ==, 1);
+
+    writel(DMA_PACING(0), ratio);
+    qtest_clock_step(global_qtest, 999);
+    writel(DMA_ABORT, 1);
+    qtest_clock_step(global_qtest, 2000);
+    g_assert_cmphex(readl(DMA_CTRL) & DMA_BUSY, ==, 0);
+    g_assert_cmphex(readl(SRAM8_WORD), ==, 0);
+    g_assert_cmphex(readl(DMA_INTR), ==, 0);
+
+    dma_start(SRAM9_WORD, SRAM8_WORD, 1, ctrl);
+    writel(RESETS_RESET + ALIAS_SET, BIT(2));
+    writel(RESETS_RESET + ALIAS_CLR, BIT(2));
+    qtest_clock_step(global_qtest, 2000);
+    g_assert_cmphex(readl(DMA_PACING(0)), ==, 0);
+    g_assert_cmphex(readl(DMA_CTRL), ==, 0);
+    g_assert_cmphex(readl(SRAM8_WORD), ==, 0);
+    g_assert_cmphex(readl(DMA_INTR), ==, 0);
+
+    /* A beat that asserts DMA reset must leave the channel cleared. */
+    writel(DMA_PACING(0), ratio);
+    writel(SRAM9_WORD, BIT(2));
+    dma_start(SRAM9_WORD, RESETS_RESET + ALIAS_SET, 1, ctrl);
+    qtest_clock_step(global_qtest, 1000);
+    g_assert_cmphex(readl(RESETS_RESET) & BIT(2), ==, BIT(2));
+    writel(RESETS_RESET + ALIAS_CLR, BIT(2));
+    g_assert_cmphex(readl(DMA_READ), ==, 0);
+    g_assert_cmphex(readl(DMA_WRITE), ==, 0);
+    g_assert_cmphex(readl(DMA_COUNT), ==, 0);
+    g_assert_cmphex(readl(DMA_INTR), ==, 0);
+}
+
+static void test_dma_pacing_chain(void)
+{
+    qtest_system_reset(global_qtest);
+    writel(RESETS_RESET + ALIAS_CLR, BIT(2));
+    writel(SRAM9_WORD, 0x12);
+    writel(SRAM9_WORD + 4, 0x34);
+    writel(SRAM8_WORD + 4, 0);
+    writel(DMA_READ + DMA_CH_STRIDE, SRAM9_WORD + 4);
+    writel(DMA_WRITE + DMA_CH_STRIDE, SRAM8_WORD + 4);
+    writel(DMA_COUNT + DMA_CH_STRIDE, 1);
+    writel(DMA_AL1_CTRL + DMA_CH_STRIDE,
+           DMA_ENABLE | DMA_WORD | DMA_CHAIN_TO(1) | DMA_TREQ_FORCE);
+
+    writel(DMA_PACING(0), (2u << 16) | 1); /* Clamp at one request per cycle. */
+    dma_start(SRAM9_WORD, SRAM8_WORD, 1, DMA_TREQ_TIMER(0) | DMA_CHAIN_TO(1));
+    qtest_clock_step(global_qtest, 6);
+    g_assert_cmphex(readl(DMA_INTR), ==, 0);
+    g_assert_cmphex(readl(SRAM8_WORD + 4), ==, 0);
+    qtest_clock_step(global_qtest, 10);
+    g_assert_cmphex(readl(SRAM8_WORD), ==, 0x12);
+    g_assert_cmphex(readl(SRAM8_WORD + 4), ==, 0x34);
+    g_assert_cmphex(readl(DMA_INTR), ==, 3);
+}
+
+static void test_dma_pacing_access(void)
+{
+    uint32_t ratio = (1u << 16) | 150;
+
+    qtest_system_reset(global_qtest);
+    writel(RESETS_RESET + ALIAS_CLR, BIT(2));
+    set_acl(ACL_DMA, 0xff);
+    writel(DMA_SEC_CH0, 1);
+    writel(DMA_PACING(3), ratio);
+    bus_read(DMA_PACING(3), 0, CPU0, false);
+    bus_write(DMA_PACING(3) + ALIAS_CLR, 0, CPU0, ratio, false);
+    g_assert_cmphex(readl(DMA_PACING(3)), ==, ratio);
+    writel(SRAM9_WORD, 0x5a);
+    writel(SRAM8_WORD, 0);
+    dma_start(SRAM9_WORD, SRAM8_WORD, 1, DMA_TREQ_TIMER(3));
+    qtest_clock_step(global_qtest, 2000);
+    g_assert_cmpuint(readl(DMA_COUNT), ==, 1);
+    g_assert_cmphex(readl(SRAM8_WORD), ==, 0);
+
+    writel(DMA_SEC_MISC + ALIAS_CLR, BIT(9)); /* TIMER3 is NSP. */
+    g_assert_cmphex(bus_read(DMA_PACING(3), 0, CPU0, true), ==, ratio);
+    bus_write(DMA_PACING(3), 0, CPU0, ratio, true);
+    bus_read(DMA_PACING(3), ATTR_USER, CPU0, false);
+    writel(DMA_MPU_BAR0, SRAM9_WORD);
+    writel(DMA_MPU_LAR0, SRAM9_WORD | 7); /* SP-only source */
+    qtest_clock_step(global_qtest, 1000);
+    g_assert_cmphex(readl(DMA_CTRL) & DMA_READ_ERROR, ==, DMA_READ_ERROR);
+    g_assert_cmphex(readl(SRAM8_WORD), ==, 0);
+
+    writel(DMA_MPU_LAR0, 0);
+    writel(DMA_CTRL, DMA_READ_ERROR);
+    dma_start(SRAM9_WORD, SRAM8_WORD, 1, DMA_TREQ_TIMER(3));
+    qtest_clock_step(global_qtest, 1000);
+    g_assert_cmpuint(readl(DMA_COUNT), ==, 0);
+    g_assert_cmphex(readl(SRAM8_WORD), ==, 0x5a);
 }
 
 static void test_pio_tx_gpio(void)
@@ -670,6 +958,12 @@ int main(int argc, char **argv)
     qtest_add_func("/rp2350/accessctrl/exceptions",
                    test_bus_exceptions_and_stripes);
     qtest_add_func("/rp2350/dma/mpu", test_dma_mpu);
+    qtest_add_func("/rp2350/dma/pio-tx", test_dma_pio_tx);
+    qtest_add_func("/rp2350/dma/pio-tx-access", test_dma_pio_tx_access);
+    qtest_add_func("/rp2350/dma/pacing", test_dma_pacing);
+    qtest_add_func("/rp2350/dma/pacing-stop", test_dma_pacing_stop);
+    qtest_add_func("/rp2350/dma/pacing-chain", test_dma_pacing_chain);
+    qtest_add_func("/rp2350/dma/pacing-access", test_dma_pacing_access);
     qtest_add_func("/rp2350/qmi/direct", test_qmi_direct);
     qtest_add_func("/rp2350/trng/entropy", test_trng);
     qtest_add_func("/rp2350/sha256/abc", test_sha256);

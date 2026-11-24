@@ -10,6 +10,7 @@
 #include "qemu/bitops.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
+#include "hw/core/irq.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/gpio/rp2350_pio.h"
 #include "hw/misc/rp2350_regs.h"
@@ -52,6 +53,14 @@ static unsigned tx_capacity(RP2350PIOSM *sm)
         return 0;
     }
     return sm->shiftctrl & FJOIN_TX ? 2 * TX_DEPTH : TX_DEPTH;
+}
+
+static void pio_update_tx_dreq(RP2350PIOSM *sm)
+{
+    RP2350PIOState *s = sm->pio;
+
+    qemu_set_irq(s->tx_dreq[sm->index], !s->held_reset &&
+                 fifo32_num_used(&sm->tx) < tx_capacity(sm));
 }
 
 static void pio_write_pins(RP2350PIOState *s, uint32_t *pins,
@@ -118,6 +127,7 @@ static bool pio_execute(RP2350PIOSM *sm, uint16_t insn, bool forced)
         }
         if (!fifo32_is_empty(&sm->tx)) {
             sm->osr = fifo32_pop(&sm->tx);
+            pio_update_tx_dreq(sm);
         } else if (insn & BIT(5)) {
             s->fdebug |= TX_STALL(sm->index);
             return false;
@@ -317,6 +327,7 @@ static void pio_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
         } else {
             pio_schedule(sm);
         }
+        pio_update_tx_dreq(sm);
         return;
     }
     case PIO_INSTR_MEM0 ... PIO_INSTR_MEM0 + 4 * RP2350_PIO_IMEM_SIZE - 1:
@@ -348,6 +359,7 @@ static void pio_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
                 fifo32_reset(&sm->tx);
             }
             sm->shiftctrl = value & 0xffffc01f;
+            pio_update_tx_dreq(sm);
             return;
         case SM_INSTR:
             pio_force(sm, value);
@@ -376,6 +388,9 @@ static void pio_reset_input(void *opaque, int line, int level)
 
     s->held_reset = level;
     if (!level) {
+        for (unsigned i = 0; i < RP2350_PIO_SM_COUNT; i++) {
+            pio_update_tx_dreq(&s->sm[i]);
+        }
         return;
     }
     s->enabled = s->gpio_base = 0;
@@ -393,6 +408,7 @@ static void pio_reset_input(void *opaque, int line, int level)
         sm->osr = sm->x = sm->pc = sm->delay = sm->forced_insn = 0;
         sm->osr_count = 32;
         sm->waiting_tx = sm->forced_stalled = false;
+        pio_update_tx_dreq(sm);
     }
     rp2350_io_bank0_update(s->io_bank0, UINT64_MAX);
 }
@@ -411,6 +427,8 @@ static void pio_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
     s->clk = qdev_init_clock_in(DEVICE(obj), "clk", NULL, NULL, 0);
     qdev_init_gpio_in_named(DEVICE(obj), pio_reset_input, "reset", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), s->tx_dreq, "tx-dreq",
+                             RP2350_PIO_SM_COUNT);
     for (unsigned i = 0; i < RP2350_PIO_SM_COUNT; i++) {
         RP2350PIOSM *sm = &s->sm[i];
 
@@ -472,6 +490,9 @@ static int pio_post_load(void *opaque, int version)
         }
     }
     rp2350_io_bank0_update(s->io_bank0, UINT64_MAX);
+    for (unsigned i = 0; i < RP2350_PIO_SM_COUNT; i++) {
+        pio_update_tx_dreq(&s->sm[i]);
+    }
     return 0;
 }
 

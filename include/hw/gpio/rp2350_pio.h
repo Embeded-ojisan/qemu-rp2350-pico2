@@ -32,6 +32,7 @@ typedef struct RP2350PIOSM {
 
 struct RP2350PIOState {
     SysBusDevice parent_obj;
+    qemu_irq tx_dreq[RP2350_PIO_SM_COUNT];
 
     MemoryRegion iomem;
     Clock *clk;

@@ -273,6 +273,8 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
     address_space_init(&s->dma_bus, MEMORY_REGION(&s->accessctrl.bus),
                         "rp2350.dma-bus");
     s->dma.bus = &s->dma_bus;
+    s->dma.accessctrl = &s->accessctrl;
+    qdev_connect_clock_in(DEVICE(sbd), "clk", s->sysclk);
     if (!sysbus_realize(sbd, errp)) {
         return;
     }
@@ -306,6 +308,14 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
     qdev_connect_gpio_out_named(DEVICE(&s->regs[RP2350_REGS_RESETS]),
                                "pio0-reset", 0,
                                qdev_get_gpio_in_named(DEVICE(sbd), "reset", 0));
+    for (unsigned i = 0; i < RP2350_PIO_SM_COUNT; i++) {
+        qdev_connect_gpio_out_named(DEVICE(sbd), "tx-dreq", i,
+                                    qdev_get_gpio_in_named(DEVICE(&s->dma),
+                                                           "pio0-tx-dreq", i));
+    }
+    qdev_connect_gpio_out_named(DEVICE(&s->accessctrl), "pio0-dreq-change", 0,
+                               qdev_get_gpio_in_named(DEVICE(&s->dma),
+                                                      "pio0-dreq-change", 0));
 
     for (unsigned n = 0; n < ARRAY_SIZE(s->timer); n++) {
         unsigned alias = RP2350_ALIAS_TIMER0 + n;

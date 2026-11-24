@@ -37,11 +37,13 @@ struct RP2350AccessCtrl {
     AddressSpace striped_as;
     MemoryRegion denied_io;
     AddressSpace denied_as;
+    qemu_irq pio0_dreq_change;
     uint8_t permissions[RP2350_ACCESSCTRL_WORDS];
     uint8_t lock;
     uint8_t force_core_ns;
 };
 
 uint32_t rp2350_accessctrl_ns_reset_mask(RP2350AccessCtrl *s);
+bool rp2350_accessctrl_pio0_dreq_allowed(RP2350AccessCtrl *s, unsigned level);
 
 #endif

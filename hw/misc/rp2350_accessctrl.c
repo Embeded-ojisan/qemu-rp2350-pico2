@@ -10,6 +10,7 @@
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
 #include "qemu/bitops.h"
+#include "hw/core/irq.h"
 #include "hw/misc/rp2350_accessctrl.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
@@ -101,6 +102,19 @@ static unsigned bus_level(RP2350AccessCtrl *s, int index)
     return level;
 }
 
+static unsigned effective_permissions(unsigned bits)
+{
+    /* Each unprivileged permission depends on its privileged partner. */
+    return bits & ((bits >> 1) | ~(BIT(NSU) | BIT(SU)));
+}
+
+bool rp2350_accessctrl_pio0_dreq_allowed(RP2350AccessCtrl *s, unsigned level)
+{
+    /* DREQ visibility uses the minimum effective level (datasheet 10.7.3). */
+    return effective_permissions(s->permissions[PIO0]) &
+           (BIT(level + 1) - 1);
+}
+
 static bool port_allows(RP2350AccessCtrl *s, unsigned port, int index)
 {
     unsigned level, bits;
@@ -113,10 +127,7 @@ static bool port_allows(RP2350AccessCtrl *s, unsigned port, int index)
     }
     level = bus_level(s, index);
     bits = BIT(4 + index / LEVEL_COUNT) | BIT(level);
-    if (!(level & 1)) {
-        bits |= BIT(level + 1);
-    }
-    return (s->permissions[port] & bits) == bits;
+    return (effective_permissions(s->permissions[port]) & bits) == bits;
 }
 
 static unsigned stripe_port(hwaddr addr)
@@ -289,6 +300,7 @@ static void reset_permissions(RP2350AccessCtrl *s)
     rp2350_sio_gpio_set_nsmask(s->sio, 0, 0);
     rp2350_sio_gpio_set_nsmask(s->sio, 1, 0);
     invalidate_bus(s);
+    qemu_irq_pulse(s->pio0_dreq_change);
 }
 
 static uint32_t reg_value(RP2350AccessCtrl *s, unsigned reg)
@@ -372,6 +384,9 @@ static MemTxResult accessctrl_write(void *opaque, hwaddr addr, uint64_t value,
         if (reg <= XIP_AUX && s->permissions[reg] != (uint8_t)value) {
             s->permissions[reg] = value;
             invalidate_bus(s);
+            if (reg == PIO0) {
+                qemu_irq_pulse(s->pio0_dreq_change);
+            }
         }
         break;
     }
@@ -402,6 +417,8 @@ static void accessctrl_init(Object *obj)
     memory_region_init_io(&s->regs, obj, &accessctrl_ops, s,
                           TYPE_RP2350_ACCESSCTRL, RP2350_ACCESSCTRL_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->regs);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->pio0_dreq_change,
+                             "pio0-dreq-change", 1);
     memory_region_init_iommu(&s->bus, sizeof(s->bus), TYPE_RP2350_BUS,
                              obj, "rp2350.bus", UINT64_C(1) << 32);
     memory_region_init(&s->striped_root, obj, "rp2350.striped", UINT64_MAX);
@@ -416,7 +433,10 @@ static void accessctrl_init(Object *obj)
 
 static int accessctrl_post_load(void *opaque, int version_id)
 {
-    invalidate_bus(opaque);
+    RP2350AccessCtrl *s = opaque;
+
+    invalidate_bus(s);
+    qemu_irq_pulse(s->pio0_dreq_change);
     return 0;
 }
 

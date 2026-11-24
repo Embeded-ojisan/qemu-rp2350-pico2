@@ -56,8 +56,13 @@ datasheet chapter 11 and SDK register definitions describe the hardware.
 [SDK register definitions](https://github.com/raspberrypi/pico-sdk/blob/2.3.1/src/rp2350/hardware_regs/include/hardware/regs/pio.h),
 [SDK hardware_pio](https://github.com/raspberrypi/pico-sdk/tree/2.3.1/src/rp2_common/hardware_pio)
 
-RX data paths, PIO IRQs, DMA DREQ, side-set, autopull, conditional
-jumps, GPIO inputs and PIO1/PIO2 execution are outside this model.
+RX data paths, PIO IRQs, side-set, autopull, conditional jumps,
+GPIO inputs and PIO1/PIO2 execution are outside this model.
 The timers approximate the clock divider in nanoseconds. Simultaneous
 writes by multiple state machines to the same pin and exact clock
 phase are outside the smoke test's timing model.
+
+The DMA qtest exercises PIO0 TX0–3 with normal and joined FIFOs.
+The DMA rechecks FIFO space before each beat and resumes after a PULL
+makes room. See the [DMA model limits](../trustzone/README.md#model-limits)
+for request visibility and timing.

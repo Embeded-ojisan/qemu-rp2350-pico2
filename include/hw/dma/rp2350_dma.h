@@ -8,12 +8,14 @@
 #define HW_DMA_RP2350_DMA_H
 
 #include "hw/core/sysbus.h"
+#include "hw/misc/rp2350_accessctrl.h"
 
 #define TYPE_RP2350_DMA "rp2350-dma"
 OBJECT_DECLARE_SIMPLE_TYPE(RP2350DMAState, RP2350_DMA)
 
 #define RP2350_DMA_CHANNELS 16
 #define RP2350_DMA_IRQS 4
+#define RP2350_DMA_TIMERS 4
 #define RP2350_DMA_MPU_REGIONS 8
 
 typedef struct RP2350DMAChannel {
@@ -31,8 +33,14 @@ struct RP2350DMAState {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     AddressSpace *bus;
+    RP2350AccessCtrl *accessctrl;
+    Clock *clk;
     QEMUTimer *timer;
     qemu_irq irq[RP2350_DMA_IRQS];
+    uint8_t pio_tx_ready;
+    uint32_t timer_config[RP2350_DMA_TIMERS];
+    int64_t timer_epoch[RP2350_DMA_TIMERS];
+    int64_t timer_next[RP2350_DMA_TIMERS];
     RP2350DMAChannel channels[RP2350_DMA_CHANNELS];
     uint32_t intr;
     uint32_t inte[RP2350_DMA_IRQS];

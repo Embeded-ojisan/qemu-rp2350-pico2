@@ -168,11 +168,21 @@ actual CPU and DMA transactions through the same filter.
 
 ### Model limits
 
-DMA models permanent-request transfers and raises the four modeled
-IRQ lines from channel status. Peripheral and timer DREQ pacing,
-sniffing, cycle arbitration, and debug counters are outside this
-milestone. The model runs transfers as virtual timer events. Live
-migration, physical silicon, and second-core behavior were untested.
+DMA supports permanent requests, PIO0 TX0–3, and pacing timers 0–3.
+The DMA observes PIO0 requests at or above the minimum effective
+ACCESSCTRL security level for PIO0. SECCFG_MISC sets the minimum level
+for both timer register access and timer request visibility. Each DMA
+beat uses the channel's security attributes for MPU and bus checks.
+
+PIO requests reflect FIFO space, with zero in-flight beats. The model
+does not track credit counters or the peripheral handshake. Timer
+requests follow the X/Y accumulator on the SoC's fixed `clk_sys`, with
+deadlines rounded up to virtual nanoseconds. Either zero coefficient
+stops the timer. Writing the register restarts its phase, and late pulses
+coalesce to one per timer callback. Each callback services at most one
+beat per channel. Other DREQs, sniffing, cycle arbitration, and debug
+counters are outside the model. Live migration, physical silicon, and
+second-core behavior were untested.
 
 GPIO function routing and IRQ delivery, QSPI pad control, and PIO
 observation require models for those paths. Pad access uses logical GPIO

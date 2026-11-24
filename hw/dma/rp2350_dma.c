@@ -10,13 +10,15 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/dma/rp2350_dma.h"
-#include "hw/misc/rp2350_accessctrl.h"
+#include "hw/gpio/rp2350_pio.h"
 #include "migration/vmstate.h"
 #include "system/dma.h"
 
 #define CTRL_EN          BIT(0)
 #define CTRL_RING_WRITE  BIT(12)
+#define TREQ_TIMER0      0x3b
 #define CTRL_PERMANENT   0x3f
 #define CTRL_IRQ_QUIET   BIT(23)
 #define CTRL_BSWAP       BIT(24)
@@ -44,6 +46,8 @@ enum {
     REG_INTR = 0x400,
     REG_IRQ_FIRST = 0x404,
     REG_IRQ_LAST = 0x43c,
+    REG_TIMER0 = 0x440,
+    REG_TIMER_LAST = REG_TIMER0 + 4 * (RP2350_DMA_TIMERS - 1),
     REG_MULTI_CHAN_TRIGGER = 0x450,
     REG_CHAN_ABORT = 0x464,
     REG_N_CHANNELS = 0x468,
@@ -97,28 +101,114 @@ static void update_irqs(RP2350DMAState *s)
     }
 }
 
-static bool channel_ready(RP2350DMAChannel *c)
+static unsigned pacing_level(RP2350DMAState *s, unsigned timer)
 {
-    /*
-     * shortcut: only the permanent request is wired. Paced channels
-     * wait until their peripheral or timer DREQ sources are modelled.
-     */
-    return c->busy && (c->ctrl & CTRL_EN) &&
-           extract32(c->ctrl, 17, 6) == CTRL_PERMANENT;
+    return extract32(s->misc_security, 2 + 2 * timer, 2);
+}
+
+static bool level_request(RP2350DMAState *s, RP2350DMAChannel *c, unsigned treq)
+{
+    /* shortcut: use FIFO space directly until in-flight credits are needed. */
+    return treq == CTRL_PERMANENT ||
+           (treq < RP2350_PIO_SM_COUNT &&
+            rp2350_accessctrl_pio0_dreq_allowed(s->accessctrl,
+                                               c->security & SEC_MASK) &&
+            (s->pio_tx_ready & BIT(treq)));
+}
+
+static bool sees_pacing_timer(RP2350DMAState *s, RP2350DMAChannel *c,
+                              unsigned treq)
+{
+    return treq >= TREQ_TIMER0 && treq < CTRL_PERMANENT &&
+           (c->security & SEC_MASK) >= pacing_level(s, treq - TREQ_TIMER0);
+}
+
+static int64_t next_pulse(RP2350DMAState *s, unsigned i, int64_t now)
+{
+    int64_t epoch = MIN(s->timer_epoch[i], now);
+    unsigned y = s->timer_config[i] & UINT16_MAX;
+    unsigned x = MIN(s->timer_config[i] >> 16, y);
+    uint64_t cycles = clock_ns_to_ticks(s->clk, now - epoch);
+    unsigned phase = ((cycles % y) * x) % y;
+    uint64_t ns;
+
+    cycles += DIV_ROUND_UP(y - phase, x);
+    ns = clock_ticks_to_ns(s->clk, cycles);
+    /* Put the deadline at or after the generating clk_sys edge. */
+    ns += clock_ns_to_ticks(s->clk, ns) < cycles;
+    return epoch + MIN(ns, (uint64_t)(INT64_MAX - epoch));
 }
 
 static void schedule_dma(RP2350DMAState *s)
 {
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t deadline = INT64_MAX;
+    unsigned timer_users = 0;
+
+    if (s->held_reset) {
+        return;
+    }
     for (unsigned i = 0; i < RP2350_DMA_CHANNELS; i++) {
-        if (channel_ready(&s->channels[i])) {
-            if (!timer_pending(s->timer)) {
-                timer_mod_ns(s->timer,
-                             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1);
-            }
-            return;
+        RP2350DMAChannel *c = &s->channels[i];
+        unsigned treq = extract32(c->ctrl, 17, 6);
+
+        if (!c->busy || !(c->ctrl & CTRL_EN)) {
+            continue;
+        }
+        if (level_request(s, c, treq)) {
+            deadline = now + 1;
+        } else if (sees_pacing_timer(s, c, treq)) {
+            timer_users |= BIT(treq - TREQ_TIMER0);
         }
     }
-    timer_del(s->timer);
+    for (unsigned i = 0; i < RP2350_DMA_TIMERS; i++) {
+        uint32_t config = s->timer_config[i];
+
+        if (!(timer_users & BIT(i)) || !(config >> 16) ||
+            !(config & UINT16_MAX) || !clock_is_enabled(s->clk)) {
+            s->timer_next[i] = 0;
+            continue;
+        }
+        if (!s->timer_next[i]) {
+            s->timer_next[i] = next_pulse(s, i, now);
+        }
+        deadline = MIN(deadline, s->timer_next[i]);
+    }
+    if (deadline == INT64_MAX) {
+        timer_del(s->timer);
+    } else if (timer_expire_time_ns(s->timer) != deadline) {
+        timer_mod_ns(s->timer, deadline);
+    }
+}
+
+static void dma_pio_tx_dreq(void *opaque, int line, int level)
+{
+    RP2350DMAState *s = opaque;
+    unsigned ready = deposit32(s->pio_tx_ready, line, 1, !!level);
+
+    if (ready != s->pio_tx_ready) {
+        s->pio_tx_ready = ready;
+        schedule_dma(s);
+    }
+}
+
+static void dma_pio0_dreq_change(void *opaque, int line, int level)
+{
+    if (level) {
+        schedule_dma(opaque);
+    }
+}
+
+static void dma_clock_update(void *opaque, ClockEvent event)
+{
+    RP2350DMAState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    for (unsigned i = 0; i < RP2350_DMA_TIMERS; i++) {
+        s->timer_epoch[i] = now;
+        s->timer_next[i] = 0;
+    }
+    schedule_dma(s);
 }
 
 static void start_channel(RP2350DMAChannel *c)
@@ -169,12 +259,18 @@ static void transfer_beat(RP2350DMAState *s, unsigned channel)
         .requester_id = RP2350_DMA_MANAGER,
     };
     uint8_t data[4];
+    MemTxResult result;
 
     if (size > sizeof(data) || !QEMU_IS_ALIGNED(c->read, size) ||
-        level < mpu_level(s, c->read) ||
-        dma_memory_read(s->bus, c->read, data, size, attrs) != MEMTX_OK) {
-        c->errors |= CTRL_READ_ERROR;
-        goto error;
+        level < mpu_level(s, c->read)) {
+        goto read_error;
+    }
+    result = dma_memory_read(s->bus, c->read, data, size, attrs);
+    if (!c->busy) {
+        return;
+    }
+    if (result != MEMTX_OK) {
+        goto read_error;
     }
     if (c->ctrl & CTRL_BSWAP) {
         for (unsigned i = 0; i < size / 2; i++) {
@@ -184,10 +280,16 @@ static void transfer_beat(RP2350DMAState *s, unsigned channel)
             data[size - i - 1] = tmp;
         }
     }
-    if (!QEMU_IS_ALIGNED(c->write, size) || level < mpu_level(s, c->write) ||
-        dma_memory_write(s->bus, c->write, data, size, attrs) != MEMTX_OK) {
-        c->errors |= CTRL_WRITE_ERROR;
-        goto error;
+    if (!QEMU_IS_ALIGNED(c->write, size) || level < mpu_level(s, c->write)) {
+        goto write_error;
+    }
+    result = dma_memory_write(s->bus, c->write, data, size, attrs);
+    /* An MMIO write can reset the DMA or abort this channel. */
+    if (!c->busy) {
+        return;
+    }
+    if (result != MEMTX_OK) {
+        goto write_error;
     }
     c->read = advance_addr(c->read, size, extract32(c->ctrl, 4, 2),
                            c->ctrl & CTRL_RING_WRITE ? UINT32_MAX : mask);
@@ -210,6 +312,11 @@ static void transfer_beat(RP2350DMAState *s, unsigned channel)
     }
     return;
 
+read_error:
+    c->errors |= CTRL_READ_ERROR;
+    goto error;
+write_error:
+    c->errors |= CTRL_WRITE_ERROR;
 error:
     c->busy = false;
     s->intr |= BIT(channel);
@@ -218,9 +325,28 @@ error:
 static void run_dma(void *opaque)
 {
     RP2350DMAState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    unsigned pulses = 0;
 
-    for (unsigned i = 0; i < RP2350_DMA_CHANNELS; i++) {
-        if (channel_ready(&s->channels[i])) {
+    /* shortcut: coalesce late pulses until queued DREQ credits are needed. */
+    for (unsigned i = 0; i < RP2350_DMA_TIMERS; i++) {
+        if (s->timer_next[i] && s->timer_next[i] <= now) {
+            pulses |= BIT(i);
+            s->timer_next[i] = next_pulse(s, i, now);
+        }
+    }
+
+    for (unsigned i = 0; i < RP2350_DMA_CHANNELS && !s->held_reset; i++) {
+        RP2350DMAChannel *c = &s->channels[i];
+        unsigned treq = extract32(c->ctrl, 17, 6);
+
+        if (!c->busy || !(c->ctrl & CTRL_EN)) {
+            continue;
+        }
+        if (level_request(s, c, treq) ||
+            (sees_pacing_timer(s, c, treq) &&
+             (pulses & BIT(treq - TREQ_TIMER0)) &&
+             s->timer_epoch[treq - TREQ_TIMER0] < now)) {
             transfer_beat(s, i);
         }
     }
@@ -284,6 +410,15 @@ static MemTxResult dma_read(void *opaque, hwaddr addr, uint64_t *value,
         } else if (reg == 8) {
             *value = irq_status(s, i);
         }
+        break;
+    }
+    case REG_TIMER0 ... REG_TIMER_LAST: {
+        unsigned i = (addr - REG_TIMER0) / 4;
+
+        if (level < pacing_level(s, i)) {
+            return MEMTX_ACCESS_ERROR;
+        }
+        *value = s->timer_config[i];
         break;
     }
     case REG_N_CHANNELS:
@@ -404,6 +539,17 @@ static MemTxResult dma_write(void *opaque, hwaddr addr, uint64_t value,
         }
         break;
     }
+    case REG_TIMER0 ... REG_TIMER_LAST: {
+        unsigned i = (addr - REG_TIMER0) / 4;
+
+        if (level < pacing_level(s, i)) {
+            return MEMTX_ACCESS_ERROR;
+        }
+        s->timer_config[i] = value;
+        s->timer_epoch[i] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->timer_next[i] = 0;
+        break;
+    }
     case REG_MULTI_CHAN_TRIGGER:
     case REG_CHAN_ABORT:
         value &= channels_visible(s, level);
@@ -503,6 +649,9 @@ static void dma_clear(RP2350DMAState *s)
     memset(s->intf, 0, sizeof(s->intf));
     memset(s->irq_security, SEC_SP, sizeof(s->irq_security));
     s->misc_security = 0x3ff;
+    memset(s->timer_config, 0, sizeof(s->timer_config));
+    memset(s->timer_epoch, 0, sizeof(s->timer_epoch));
+    memset(s->timer_next, 0, sizeof(s->timer_next));
     s->mpu_ctrl = 0;
     memset(s->mpu_bar, 0, sizeof(s->mpu_bar));
     memset(s->mpu_lar, 0, sizeof(s->mpu_lar));
@@ -538,7 +687,13 @@ static void dma_init(Object *obj)
         sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq[i]);
     }
     qdev_init_gpio_in_named(DEVICE(obj), dma_reset_input, "reset", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), dma_pio_tx_dreq, "pio0-tx-dreq",
+                            RP2350_PIO_SM_COUNT);
+    qdev_init_gpio_in_named(DEVICE(obj), dma_pio0_dreq_change,
+                            "pio0-dreq-change", 1);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, run_dma, s);
+    s->clk = qdev_init_clock_in(DEVICE(obj), "clk", dma_clock_update, s,
+                               ClockUpdate);
 }
 
 static void dma_finalize(Object *obj)
@@ -569,6 +724,14 @@ static int dma_post_load(void *opaque, int version_id)
 {
     RP2350DMAState *s = opaque;
 
+    if (s->held_reset) {
+        timer_del(s->timer);
+    }
+    for (unsigned i = 0; i < RP2350_DMA_TIMERS; i++) {
+        if (s->timer_epoch[i] < 0 || s->timer_next[i] < 0) {
+            return -EINVAL;
+        }
+    }
     update_irqs(s);
     schedule_dma(s);
     return 0;
@@ -576,7 +739,7 @@ static int dma_post_load(void *opaque, int version_id)
 
 static const VMStateDescription dma_vmstate = {
     .name = TYPE_RP2350_DMA,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = dma_post_load,
     .fields = (const VMStateField[]) {
@@ -592,6 +755,11 @@ static const VMStateDescription dma_vmstate = {
         VMSTATE_UINT32_ARRAY(mpu_lar, RP2350DMAState, RP2350_DMA_MPU_REGIONS),
         VMSTATE_BOOL(held_reset, RP2350DMAState),
         VMSTATE_TIMER_PTR(timer, RP2350DMAState),
+        VMSTATE_UINT32_ARRAY_V(timer_config, RP2350DMAState,
+                               RP2350_DMA_TIMERS, 2),
+        VMSTATE_INT64_ARRAY_V(timer_epoch, RP2350DMAState,
+                              RP2350_DMA_TIMERS, 2),
+        VMSTATE_INT64_ARRAY_V(timer_next, RP2350DMAState, RP2350_DMA_TIMERS, 2),
         VMSTATE_END_OF_LIST()
     },
 };
