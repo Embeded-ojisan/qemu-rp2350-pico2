@@ -10,8 +10,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
-#include "hw/gpio/rp2350_sio.h"
 #include "hw/core/irq.h"
+#include "hw/gpio/rp2350_pio.h"
 #include "hw/misc/rp2350_accessctrl.h"
 #include "hw/misc/rp2350_regs.h"
 #include "migration/vmstate.h"
@@ -21,6 +21,7 @@
 #define RESETS_RESET            0x000
 #define RESETS_RESET_DONE       0x008
 #define RESETS_RESET_DMA        BIT(2)
+#define RESETS_RESET_PIO0       BIT(11)
 #define RESETS_ALL_BITS         0x1fffffff
 
 /* CLOCKS: each clock has CTRL, DIV and SELECTED at a 12-byte stride */
@@ -58,11 +59,16 @@
 
 /* IO_BANK0 and PADS_BANK0 per-pin register layouts */
 #define IO_BANK0_GPIO_STRIDE       8
+#define IO_BANK0_OUTTOPAD          BIT(9)
+#define IO_BANK0_OETOPAD           BIT(13)
+#define IO_BANK0_FUNC_PIO0         6
 #define IO_BANK0_IRQSUMMARY_NS0    0x208
 #define IO_BANK0_IRQSUMMARY_END    0x230
 #define IO_BANK0_IRQ_END           0x320
 #define IO_BANK0_PINS_PER_IRQ_WORD 8
 #define PADS_BANK0_GPIO0           0x004
+#define PADS_BANK0_OD              BIT(7)
+#define PADS_BANK0_ISO             BIT(8)
 
 static uint32_t rp2350_regs_access_mask(RP2350RegsState *s, hwaddr offset,
                                         MemTxAttrs attrs)
@@ -133,6 +139,9 @@ static void rp2350_regs_reset_hold(Object *obj, ResetType type)
          rv += 2) {
         s->regs[rv[0] / 4] = rv[1];
     }
+    if (s->gpio_pio0) {
+        rp2350_io_bank0_update(s, UINT64_MAX);
+    }
 }
 
 static void rp2350_regs_init(Object *obj)
@@ -183,6 +192,7 @@ static bool rp2350_resets_write(RP2350RegsState *s, hwaddr offset,
     if (offset == RESETS_RESET) {
         trace_rp2350_resets(value);
         qemu_set_irq(s->dma_reset, !!(value & RESETS_RESET_DMA));
+        qemu_set_irq(s->pio0_reset, !!(value & RESETS_RESET_PIO0));
     }
     return offset == RESETS_RESET_DONE; /* read-only */
 }
@@ -192,6 +202,7 @@ static void rp2350_resets_init(Object *obj)
     RP2350RegsState *s = RP2350_REGS(obj);
 
     qdev_init_gpio_out_named(DEVICE(obj), &s->dma_reset, "dma-reset", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->pio0_reset, "pio0-reset", 1);
 }
 
 static uint32_t rp2350_resets_ns_mask(RP2350RegsState *s, hwaddr offset)
@@ -359,14 +370,112 @@ static uint32_t rp2350_pads_bank0_nonsecure_mask(RP2350RegsState *s,
     return 0;
 }
 
+static bool rp2350_gpio_override(bool signal, unsigned override)
+{
+    if (override & 2) {
+        return override & 1;
+    }
+    return signal ^ override;
+}
+
+static uint32_t rp2350_pio_gpio_status(RP2350RegsState *s, unsigned pin)
+{
+    RP2350PIOState *pio = s->gpio_pio0;
+    uint32_t ctrl = s->regs[2 * pin + 1];
+    unsigned bit;
+    bool out, oe;
+
+    if (!pio || extract32(ctrl, 0, 5) != IO_BANK0_FUNC_PIO0 ||
+        pin < pio->gpio_base || pin >= pio->gpio_base + 32) {
+        return 0;
+    }
+    bit = pin - pio->gpio_base;
+    out = rp2350_gpio_override(pio->padout & BIT(bit), extract32(ctrl, 12, 2));
+    oe = rp2350_gpio_override(pio->padoe & BIT(bit), extract32(ctrl, 14, 2));
+    return (out ? IO_BANK0_OUTTOPAD : 0) | (oe ? IO_BANK0_OETOPAD : 0);
+}
+
+void rp2350_io_bank0_update(RP2350RegsState *s, uint64_t mask)
+{
+    if (!s || !s->gpio_pads) {
+        return;
+    }
+    mask &= MAKE_64BIT_MASK(0, RP2350_SIO_NUM_GPIO);
+    while (mask) {
+        unsigned pin = ctz64(mask);
+        uint64_t bit = BIT_ULL(pin);
+        uint32_t status = rp2350_pio_gpio_status(s, pin);
+        uint32_t pad = s->gpio_pads->regs[PADS_BANK0_GPIO0 / 4 + pin];
+        bool driven = (status & IO_BANK0_OETOPAD) &&
+                      !(pad & (PADS_BANK0_OD | PADS_BANK0_ISO));
+        bool level = driven && (status & IO_BANK0_OUTTOPAD);
+
+        mask &= ~bit;
+        if (driven != !!(s->pio_driven & bit) ||
+            level != !!(s->pio_levels & bit)) {
+            s->pio_driven = deposit64(s->pio_driven, pin, 1, driven);
+            s->pio_levels = deposit64(s->pio_levels, pin, 1, level);
+            qemu_set_irq(s->pio_gpio[pin], level);
+            trace_rp2350_pio_gpio_pad(pin, level, driven);
+        }
+    }
+}
+
+static uint32_t rp2350_io_bank0_read(RP2350RegsState *s, hwaddr offset)
+{
+    if (offset < RP2350_SIO_NUM_GPIO * IO_BANK0_GPIO_STRIDE && !(offset & 4)) {
+        return rp2350_pio_gpio_status(s, offset / IO_BANK0_GPIO_STRIDE);
+    }
+    return s->regs[offset / 4];
+}
+
+static bool rp2350_io_bank0_write(RP2350RegsState *s, hwaddr offset,
+                                  uint32_t value)
+{
+    if (offset >= RP2350_SIO_NUM_GPIO * IO_BANK0_GPIO_STRIDE) {
+        return false;
+    }
+    if (offset & 4) {
+        s->regs[offset / 4] = value;
+        rp2350_io_bank0_update(s, BIT_ULL(offset / IO_BANK0_GPIO_STRIDE));
+    }
+    return true;
+}
+
+static void rp2350_io_bank0_init(Object *obj)
+{
+    RP2350RegsState *s = RP2350_REGS(obj);
+
+    qdev_init_gpio_out_named(DEVICE(obj), s->pio_gpio, "pio-out",
+                            RP2350_SIO_NUM_GPIO);
+}
+
+static bool rp2350_pads_bank0_write(RP2350RegsState *s, hwaddr offset,
+                                    uint32_t value)
+{
+    if (offset < PADS_BANK0_GPIO0 ||
+        offset >= PADS_BANK0_GPIO0 + 4 * RP2350_SIO_NUM_GPIO) {
+        return false;
+    }
+    s->regs[offset / 4] = value;
+    rp2350_io_bank0_update(s->io_bank0,
+                           BIT_ULL((offset - PADS_BANK0_GPIO0) / 4));
+    return true;
+}
+
 static void rp2350_io_bank0_class_init(ObjectClass *klass, const void *data)
 {
-    RP2350_REGS_CLASS(klass)->nonsecure_mask = rp2350_io_bank0_nonsecure_mask;
+    RP2350RegsClass *rc = RP2350_REGS_CLASS(klass);
+
+    rc->nonsecure_mask = rp2350_io_bank0_nonsecure_mask;
+    rc->read = rp2350_io_bank0_read;
+    rc->write = rp2350_io_bank0_write;
 }
 
 static void rp2350_pads_bank0_class_init(ObjectClass *klass, const void *data)
 {
     RP2350_REGS_CLASS(klass)->nonsecure_mask = rp2350_pads_bank0_nonsecure_mask;
+    RP2350_REGS_CLASS(klass)->write = rp2350_pads_bank0_write;
 }
 
 /*
@@ -461,9 +570,10 @@ static const TypeInfo rp2350_regs_types[] = {
         .parent = TYPE_RP2350_REGS,
         .class_init = rp2350_ticks_class_init,
     }, {
-        /* shortcut: plain storage; no GPIO interrupts or status */
+        /* shortcut: PIO0 output status only; no GPIO inputs or interrupts */
         .name = TYPE_RP2350_IO_BANK0,
         .parent = TYPE_RP2350_REGS,
+        .instance_init = rp2350_io_bank0_init,
         .class_init = rp2350_io_bank0_class_init,
     }, {
         /* shortcut: plain storage with zero reset values */

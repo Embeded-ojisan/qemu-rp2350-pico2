@@ -1,5 +1,5 @@
 /*
- * QTest for the RP2350 atomic aliases, NVIC and SIO banks
+ * QTest for RP2350 peripherals and the system bus
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -85,6 +85,26 @@
 #define OTP_GUARDED3           (0x40138000 + 0xc0 * 2)
 #define TIMER0_RAW_LO          0x400b0028
 #define TIMER1_RAW_LO          0x400b8028
+#define PIO0_BASE              0x50200000
+#define PIO_CTRL               (PIO0_BASE + 0x000)
+#define PIO_FSTAT              (PIO0_BASE + 0x004)
+#define PIO_FDEBUG             (PIO0_BASE + 0x008)
+#define PIO_FLEVEL             (PIO0_BASE + 0x00c)
+#define PIO_TXF0               (PIO0_BASE + 0x010)
+#define PIO_IMEM(n)            (PIO0_BASE + 0x048 + 4 * (n))
+#define PIO_SM0_SHIFTCTRL      (PIO0_BASE + 0x0d0)
+#define PIO_SM0_ADDR           (PIO0_BASE + 0x0d4)
+#define PIO_SM0_INSTR          (PIO0_BASE + 0x0d8)
+#define PIO_SM0_PINCTRL        (PIO0_BASE + 0x0dc)
+#define PIO_TX0_EMPTY          BIT(24)
+#define PIO_TX0_STALL          BIT(24)
+#define PIO0_RESET             BIT(11)
+#define LED_PIN                25
+#define LED_STATUS             (IO_BANK0_GPIO0_CTRL - 4 + 8 * LED_PIN)
+#define LED_CTRL               (LED_STATUS + 4)
+#define LED_PAD                (0x40038004 + 4 * LED_PIN)
+#define GPIO_OUTTOPAD          BIT(9)
+#define GPIO_OETOPAD           BIT(13)
 
 enum {
     CPU0 = 0, DMA_MASTER = 2,
@@ -566,6 +586,73 @@ static void test_dma_mpu(void)
     g_assert_cmphex(readl(DMA_MPU_LAR0), ==, 0);
 }
 
+static void test_pio_tx_gpio(void)
+{
+    QTestState *s = qtest_init("-machine raspi-pico2");
+
+    qtest_irq_intercept_out_named(s, "/machine/soc/regs[2]", "pio-out");
+    qtest_writel(s, RESETS_RESET + ALIAS_CLR, PIO0_RESET);
+    qtest_writel(s, LED_CTRL, 6); /* PIO0 */
+    qtest_writel(s, PIO_SM0_PINCTRL, (1u << 26) | (LED_PIN << 5));
+    qtest_writel(s, PIO_SM0_INSTR, 0xe081); /* SET PINDIRS, 1 while disabled */
+    qtest_writel(s, PIO_SM0_PINCTRL, (1u << 20) | LED_PIN);
+    g_assert_cmphex(qtest_readl(s, LED_STATUS), ==, GPIO_OETOPAD);
+
+    qtest_writel(s, PIO_IMEM(7), 0x80a0); /* PULL BLOCK */
+    qtest_writel(s, PIO_IMEM(8), 0x6001); /* OUT PINS, 1 */
+    qtest_writel(s, PIO_IMEM(9), 0x0007); /* JMP 7 */
+    qtest_writel(s, PIO_SM0_INSTR, 0x0007); /* JMP 7 while disabled */
+    qtest_writel(s, PIO_CTRL + ALIAS_SET, 1);
+    qtest_clock_step(s, 100);
+    g_assert_cmphex(qtest_readl(s, PIO_SM0_ADDR), ==, 7);
+    g_assert_cmphex(qtest_readl(s, PIO_FSTAT) & PIO_TX0_EMPTY, ==,
+                    PIO_TX0_EMPTY);
+    g_assert_cmphex(qtest_readl(s, PIO_FDEBUG), ==, PIO_TX0_STALL);
+    g_assert_false(qtest_get_irq(s, LED_PIN));
+
+    qtest_writel(s, PIO_FDEBUG, PIO_TX0_STALL);
+    qtest_writel(s, PIO_TXF0, 3);
+    g_assert_cmphex(qtest_readl(s, PIO_FLEVEL), ==, 1);
+    qtest_clock_step(s, 100);
+    g_assert_cmphex(qtest_readl(s, PIO_FLEVEL), ==, 0);
+    g_assert_cmphex(qtest_readl(s, PIO_SM0_ADDR), ==, 7);
+    g_assert_cmphex(qtest_readl(s, PIO_FDEBUG), ==, PIO_TX0_STALL);
+    g_assert_cmphex(qtest_readl(s, LED_STATUS), ==,
+                    GPIO_OETOPAD | GPIO_OUTTOPAD);
+    g_assert_true(qtest_get_irq(s, LED_PIN));
+
+    qtest_writel(s, LED_PAD + ALIAS_SET, BIT(7)); /* pad output disable */
+    g_assert_false(qtest_get_irq(s, LED_PIN));
+    qtest_writel(s, LED_PAD + ALIAS_CLR, BIT(7));
+    g_assert_true(qtest_get_irq(s, LED_PIN));
+    qtest_writel(s, LED_CTRL, 5); /* disconnect PIO0 from the pad */
+    g_assert_false(qtest_get_irq(s, LED_PIN));
+    qtest_writel(s, LED_CTRL, 6);
+    g_assert_true(qtest_get_irq(s, LED_PIN));
+
+    qtest_writel(s, PIO_CTRL + ALIAS_CLR, 1);
+    qtest_writel(s, PIO_TXF0, 2);
+    qtest_clock_step(s, 100);
+    g_assert_cmphex(qtest_readl(s, PIO_FLEVEL), ==, 1);
+    g_assert_true(qtest_get_irq(s, LED_PIN));
+    qtest_writel(s, PIO_CTRL + ALIAS_SET, 1);
+    qtest_clock_step(s, 100);
+    g_assert_cmphex(qtest_readl(s, PIO_FLEVEL), ==, 0);
+    g_assert_cmphex(qtest_readl(s, LED_STATUS), ==, GPIO_OETOPAD);
+    g_assert_false(qtest_get_irq(s, LED_PIN));
+
+    qtest_writel(s, PIO_CTRL + ALIAS_CLR, 1);
+    qtest_writel(s, PIO_TXF0, 1);
+    qtest_writel(s, PIO_SM0_SHIFTCTRL + ALIAS_XOR, BIT(31)); /* FJOIN_RX */
+    g_assert_cmphex(qtest_readl(s, PIO_FLEVEL), ==, 0);
+    qtest_writel(s, RESETS_RESET + ALIAS_SET, PIO0_RESET);
+    qtest_writel(s, RESETS_RESET + ALIAS_CLR, PIO0_RESET);
+    g_assert_cmphex(qtest_readl(s, LED_STATUS), ==, 0);
+    g_assert_cmphex(qtest_readl(s, PIO_FDEBUG), ==, 0);
+    g_assert_cmphex(qtest_readl(s, PIO_SM0_ADDR), ==, 0);
+    qtest_quit(s);
+}
+
 int main(int argc, char **argv)
 {
     int ret;
@@ -588,6 +675,7 @@ int main(int argc, char **argv)
     qtest_add_func("/rp2350/sha256/abc", test_sha256);
     qtest_add_func("/rp2350/otp/locks-reset", test_otp);
     qtest_add_func("/rp2350/timer/two-instances", test_timers);
+    qtest_add_func("/rp2350/pio/tx-gpio", test_pio_tx_gpio);
 
     qtest_start("-machine raspi-pico2");
     ret = g_test_run();

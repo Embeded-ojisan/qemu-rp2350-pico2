@@ -11,6 +11,7 @@
 #include "hw/char/pl011.h"
 #include "hw/core/clock.h"
 #include "hw/dma/rp2350_dma.h"
+#include "hw/gpio/rp2350_pio.h"
 #include "hw/gpio/rp2350_sio.h"
 #include "hw/misc/rp2350_accessctrl.h"
 #include "hw/misc/rp2350_atomic.h"
@@ -54,6 +55,7 @@ enum {
     RP2350_ALIAS_TRNG,
     RP2350_ALIAS_SHA256,
     RP2350_ALIAS_OTP,
+    RP2350_ALIAS_PIO0,
     RP2350_ALIAS_NUM
 };
 
@@ -63,6 +65,7 @@ struct RP2350State {
     ARMv7MState armv7m;
     RP2350RegsState regs[RP2350_REGS_NUM];
     RP2350SIOState sio;
+    RP2350PIOState pio0;
     RP2350AccessCtrl accessctrl;
     RP2350DMAState dma;
     AddressSpace dma_bus;

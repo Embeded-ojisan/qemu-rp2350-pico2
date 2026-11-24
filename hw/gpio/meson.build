@@ -15,7 +15,8 @@ system_ss.add(when: 'CONFIG_RASPI', if_true: files(
     'bcm2838_gpio.c'
 ))
 system_ss.add(when: 'CONFIG_STM32L4X5_SOC', if_true: files('stm32l4x5_gpio.c'))
-system_ss.add(when: 'CONFIG_RP2350_SOC', if_true: files('rp2350_sio.c'))
+system_ss.add(when: 'CONFIG_RP2350_SOC',
+              if_true: files('rp2350_pio.c', 'rp2350_sio.c'))
 system_ss.add(when: 'CONFIG_ASPEED_SOC', if_true: files('aspeed_gpio.c'))
 system_ss.add(when: 'CONFIG_ASPEED_SOC', if_true: files('aspeed_sgpio.c'))
 system_ss.add(when: 'CONFIG_SIFIVE_GPIO', if_true: files('sifive_gpio.c'))

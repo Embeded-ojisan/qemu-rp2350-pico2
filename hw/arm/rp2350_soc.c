@@ -65,6 +65,7 @@ static const hwaddr rp2350_alias_base[RP2350_ALIAS_NUM] = {
     [RP2350_ALIAS_TRNG]   = 0x400f0000,
     [RP2350_ALIAS_SHA256] = 0x400f8000,
     [RP2350_ALIAS_OTP]    = 0x40120000,
+    [RP2350_ALIAS_PIO0]   = 0x50200000,
 };
 
 static const struct {
@@ -94,7 +95,6 @@ static const struct {
     { "glitch_detector",    0x40158000, 0x8000 },
     { "tbman",              0x40160000, 0x8000 },
     { "usbctrl",            0x50100000, 0x100000 },
-    { "pio0",               0x50200000, 0x100000 },
     { "pio1",               0x50300000, 0x100000 },
     { "pio2",               0x50400000, 0x100000 },
     { "xip_aux",            0x50500000, 0x100000 },
@@ -146,6 +146,8 @@ static const MemoryRegionOps rp2350_rom_ops = {
 static void rp2350_init(Object *obj)
 {
     RP2350State *s = RP2350(obj);
+    RP2350RegsState *io_bank0 = &s->regs[RP2350_REGS_IO_BANK0];
+    RP2350RegsState *pads_bank0 = &s->regs[RP2350_REGS_PADS_BANK0];
 
     object_initialize_child(obj, "armv7m", &s->armv7m, TYPE_ARMV7M);
     for (int i = 0; i < RP2350_REGS_NUM; i++) {
@@ -158,8 +160,13 @@ static void rp2350_init(Object *obj)
     s->accessctrl.sio = &s->sio;
     s->regs[RP2350_REGS_RESETS].accessctrl = &s->accessctrl;
     object_initialize_child(obj, "dma", &s->dma, TYPE_RP2350_DMA);
-    s->regs[RP2350_REGS_IO_BANK0].gpio_sio = &s->sio;
-    s->regs[RP2350_REGS_PADS_BANK0].gpio_sio = &s->sio;
+    object_initialize_child(obj, "pio0", &s->pio0, TYPE_RP2350_PIO);
+    s->pio0.io_bank0 = io_bank0;
+    io_bank0->gpio_pio0 = &s->pio0;
+    io_bank0->gpio_pads = pads_bank0;
+    pads_bank0->io_bank0 = io_bank0;
+    io_bank0->gpio_sio = &s->sio;
+    pads_bank0->gpio_sio = &s->sio;
     object_initialize_child(obj, "timer0", &s->timer[0], TYPE_RP2350_TIMER);
     object_initialize_child(obj, "timer1", &s->timer[1], TYPE_RP2350_TIMER);
     object_initialize_child(obj, "qmi", &s->qmi, TYPE_RP2350_QMI);
@@ -287,6 +294,18 @@ static void rp2350_realize(DeviceState *dev, Error **errp)
     }
     sysbus_mmio_map(sbd, 0, RP2350_SIO_BASE);
     rp2350_coproc_init(s->armv7m.cpu, &s->sio);
+
+    sbd = SYS_BUS_DEVICE(&s->pio0);
+    qdev_connect_clock_in(DEVICE(sbd), "clk", s->sysclk);
+    if (!sysbus_realize(sbd, errp)) {
+        return;
+    }
+    rp2350_map_alias(s, RP2350_ALIAS_PIO0, TYPE_RP2350_PIO,
+                     sysbus_mmio_get_region(sbd, 0),
+                     rp2350_alias_base[RP2350_ALIAS_PIO0]);
+    qdev_connect_gpio_out_named(DEVICE(&s->regs[RP2350_REGS_RESETS]),
+                               "pio0-reset", 0,
+                               qdev_get_gpio_in_named(DEVICE(sbd), "reset", 0));
 
     for (unsigned n = 0; n < ARRAY_SIZE(s->timer); n++) {
         unsigned alias = RP2350_ALIAS_TIMER0 + n;

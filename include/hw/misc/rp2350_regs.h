@@ -13,6 +13,7 @@
 #define HW_MISC_RP2350_REGS_H
 
 #include "hw/core/sysbus.h"
+#include "hw/gpio/rp2350_sio.h"
 #include "hw/misc/rp2350_atomic.h"
 #include "qom/object.h"
 
@@ -36,7 +37,14 @@ struct RP2350RegsState {
     MemoryRegion iomem;
     struct RP2350SIOState *gpio_sio;
     struct RP2350AccessCtrl *accessctrl;
+    struct RP2350PIOState *gpio_pio0;
+    RP2350RegsState *gpio_pads;
+    RP2350RegsState *io_bank0;
     qemu_irq dma_reset;
+    qemu_irq pio0_reset;
+    qemu_irq pio_gpio[RP2350_SIO_NUM_GPIO];
+    uint64_t pio_levels;
+    uint64_t pio_driven;
     uint32_t regs[RP2350_REGS_NUM_WORDS];
 };
 
@@ -52,5 +60,7 @@ struct RP2350RegsClass {
     /* Optional: handle a write; return false to store it as is */
     bool (*write)(RP2350RegsState *s, hwaddr offset, uint32_t value);
 };
+
+void rp2350_io_bank0_update(RP2350RegsState *s, uint64_t mask);
 
 #endif
